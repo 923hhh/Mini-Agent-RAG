@@ -1,0 +1,11 @@
+PROJECT_NAME: mini-agent-rag2
+PYTHON_VERSION: "3.11"
+API_HOST: 127.0.0.1
+API_PORT: 8000
+WEBUI_HOST: 127.0.0.1
+WEBUI_PORT: 8501
+DATA_ROOT: ./data
+KB_ROOT_PATH: ./data/knowledge_base
+TEMP_ROOT_PATH: ./data/temp
+LOG_PATH: ./data/logs
+VECTOR_STORE_PATH: ./data/vector_store

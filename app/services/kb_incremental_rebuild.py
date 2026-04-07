@@ -1,0 +1,619 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from hashlib import sha1, sha256
+from pathlib import Path
+from time import perf_counter
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict
+
+from app.loaders.documents import list_supported_files
+from app.schemas.kb import DocumentChunkRecord, RebuildKnowledgeBaseResult
+from app.services.embedding_assembler import EmbeddingAssembler, extract_header_metadata
+from app.services.settings import AppSettings
+from app.storage.vector_stores import (
+    VectorStoreEntry,
+    vector_store_index_exists,
+)
+
+
+class CachedChunkEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str
+    page_content: str
+    metadata: dict[str, Any]
+    embedding: list[float]
+    content_sha256: str
+
+
+class FileChunkCache(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    relative_path: str
+    source_path: str
+    extension: str
+    size_bytes: int
+    modified_at: float
+    sha256: str
+    raw_documents: int
+    chunks: int
+    chunk_entries: list[CachedChunkEntry]
+
+
+class BuildManifestEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    relative_path: str
+    source_path: str
+    extension: str
+    size_bytes: int
+    modified_at: float
+    sha256: str
+    raw_documents: int
+    chunks: int
+    cache_file: str
+
+
+class KnowledgeBaseBuildManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    knowledge_base_name: str
+    chunk_size: int
+    chunk_overlap: int
+    embedding_model: str
+    text_splitter_name: str = "ChineseRecursiveTextSplitter"
+    vector_store_type: str = "faiss"
+    built_at: datetime
+    files_total: int
+    raw_documents_total: int
+    chunks_total: int
+    files: list[BuildManifestEntry]
+
+
+@dataclass
+class FileSnapshot:
+    path: Path
+    relative_path: str
+    size_bytes: int
+    modified_at: float
+    extension: str
+    sha256: str | None = None
+
+
+@dataclass
+class FileBuildPlan:
+    snapshot: FileSnapshot
+    change_kind: Literal["reuse", "new", "modified"]
+    manifest_entry: BuildManifestEntry | None = None
+
+
+@dataclass
+class BuildCachesResult:
+    outputs: dict[str, tuple[BuildManifestEntry, FileChunkCache]]
+    stage_timings: dict[str, float]
+
+
+def rebuild_incremental_knowledge_base(
+    *,
+    settings: AppSettings,
+    knowledge_base_name: str,
+    content_dir: Path,
+    vector_store_dir: Path,
+    chunk_size: int,
+    chunk_overlap: int,
+    embedding_model: str,
+) -> RebuildKnowledgeBaseResult:
+    total_started_at = perf_counter()
+    stage_timings: dict[str, float] = {}
+    metadata_path = vector_store_dir / "metadata.json"
+    manifest_path = settings.vector_store_manifest_path(knowledge_base_name)
+    chunk_cache_dir = settings.vector_store_chunk_cache_dir(knowledge_base_name)
+    chunk_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    started_at = perf_counter()
+    files = list_supported_files(content_dir, settings.kb.SUPPORTED_EXTENSIONS)
+    stage_timings["scan_files"] = round(perf_counter() - started_at, 4)
+    if not files:
+        supported = ", ".join(settings.kb.SUPPORTED_EXTENSIONS)
+        raise ValueError(
+            f"知识库目录中未找到可处理文件: {content_dir}\n"
+            f"请将文档放入该目录后重试。支持格式: {supported}"
+        )
+
+    existing_manifest = load_build_manifest(manifest_path)
+    started_at = perf_counter()
+    plans, deleted_entries, index_mode = plan_rebuild(
+        settings=settings,
+        files=files,
+        content_dir=content_dir,
+        existing_manifest=existing_manifest,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embedding_model=embedding_model,
+        metadata_path=metadata_path,
+        vector_store_dir=vector_store_dir,
+        chunk_cache_dir=chunk_cache_dir,
+    )
+    stage_timings["plan_rebuild"] = round(perf_counter() - started_at, 4)
+    rebuilt_plans = [plan for plan in plans if plan.change_kind in {"new", "modified"}]
+    reused_plans = [plan for plan in plans if plan.change_kind == "reuse"]
+    files_rebuilt = len(rebuilt_plans)
+    files_reused = len(reused_plans)
+    files_deleted = len(deleted_entries)
+
+    if index_mode == "reuse":
+        final_manifest = build_manifest_from_plans(
+            knowledge_base_name=knowledge_base_name,
+            plans=plans,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            embedding_model=embedding_model,
+            text_splitter_name=settings.kb.TEXT_SPLITTER_NAME,
+            vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+        )
+        started_at = perf_counter()
+        write_build_manifest(manifest_path, final_manifest)
+        stage_timings["manifest_write"] = round(perf_counter() - started_at, 4)
+        stage_timings["total"] = round(perf_counter() - total_started_at, 4)
+        return RebuildKnowledgeBaseResult(
+            knowledge_base_name=knowledge_base_name,
+            content_dir=content_dir,
+            vector_store_dir=vector_store_dir,
+            metadata_path=metadata_path,
+            build_manifest_path=manifest_path,
+            files_processed=len(files),
+            raw_documents=final_manifest.raw_documents_total,
+            chunks=final_manifest.chunks_total,
+            incremental_rebuild=settings.kb.ENABLE_INCREMENTAL_REBUILD,
+            index_mode=index_mode,
+            files_total=len(files),
+            files_reused=files_reused,
+            files_rebuilt=files_rebuilt,
+            files_deleted=files_deleted,
+            chunks_reused=final_manifest.chunks_total,
+            chunks_embedded=0,
+            vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+            stage_timings_seconds=stage_timings,
+        )
+
+    started_at = perf_counter()
+    assembler = EmbeddingAssembler(
+        settings,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embedding_model=embedding_model,
+        text_splitter_name=settings.kb.TEXT_SPLITTER_NAME,
+        vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+    )
+    stage_timings["init_embeddings"] = round(perf_counter() - started_at, 4)
+
+    build_caches_result = build_caches_for_plans(
+        settings=settings,
+        content_dir=content_dir,
+        plans=rebuilt_plans,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        chunk_cache_dir=chunk_cache_dir,
+        embedding_model=embedding_model,
+    )
+    rebuilt_outputs = build_caches_result.outputs
+    stage_timings.update(build_caches_result.stage_timings)
+    chunks_embedded = sum(cache.chunks for _, cache in rebuilt_outputs.values())
+    chunks_reused = sum((plan.manifest_entry.chunks if plan.manifest_entry else 0) for plan in reused_plans)
+
+    if index_mode == "append":
+        started_at = perf_counter()
+        existing_records = load_metadata_records(metadata_path)
+        new_chunk_entries = flatten_chunk_entries([cache for _, cache in rebuilt_outputs.values()])
+        if new_chunk_entries:
+            assembler.persist_entries(
+                vector_store_dir=vector_store_dir,
+                knowledge_name=knowledge_base_name,
+                entries=[cached_entry_to_vector_entry(item) for item in new_chunk_entries],
+                mode="append",
+            )
+        metadata_records = existing_records + [chunk_entry_to_record(item) for item in new_chunk_entries]
+        stage_timings["index_build"] = round(perf_counter() - started_at, 4)
+    else:
+        reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
+        all_chunk_entries = flatten_chunk_entries(reused_caches + [cache for _, cache in rebuilt_outputs.values()])
+        if not all_chunk_entries:
+            raise ValueError(f"文档已加载，但未生成任何切片: {content_dir}")
+        started_at = perf_counter()
+        assembler.persist_entries(
+            vector_store_dir=vector_store_dir,
+            knowledge_name=knowledge_base_name,
+            entries=[cached_entry_to_vector_entry(item) for item in all_chunk_entries],
+            mode="full",
+        )
+        metadata_records = [chunk_entry_to_record(item) for item in all_chunk_entries]
+        stage_timings["index_build"] = round(perf_counter() - started_at, 4)
+
+    started_at = perf_counter()
+    write_metadata_records(metadata_path, metadata_records)
+    stage_timings["metadata_write"] = round(perf_counter() - started_at, 4)
+    final_manifest = build_manifest_from_plans(
+        knowledge_base_name=knowledge_base_name,
+        plans=plans,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embedding_model=embedding_model,
+        text_splitter_name=settings.kb.TEXT_SPLITTER_NAME,
+        vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+        rebuilt_outputs=rebuilt_outputs,
+    )
+    started_at = perf_counter()
+    write_build_manifest(manifest_path, final_manifest)
+    stage_timings["manifest_write"] = round(perf_counter() - started_at, 4)
+    started_at = perf_counter()
+    cleanup_deleted_caches(chunk_cache_dir, deleted_entries)
+    stage_timings["cache_cleanup"] = round(perf_counter() - started_at, 4)
+    stage_timings["total"] = round(perf_counter() - total_started_at, 4)
+
+    return RebuildKnowledgeBaseResult(
+        knowledge_base_name=knowledge_base_name,
+        content_dir=content_dir,
+        vector_store_dir=vector_store_dir,
+        metadata_path=metadata_path,
+        build_manifest_path=manifest_path,
+        files_processed=len(files),
+        raw_documents=final_manifest.raw_documents_total,
+        chunks=final_manifest.chunks_total,
+        incremental_rebuild=settings.kb.ENABLE_INCREMENTAL_REBUILD,
+        index_mode=index_mode,
+        files_total=len(files),
+        files_reused=files_reused,
+        files_rebuilt=files_rebuilt,
+        files_deleted=files_deleted,
+        chunks_reused=chunks_reused,
+        chunks_embedded=chunks_embedded,
+        vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+        stage_timings_seconds=stage_timings,
+    )
+
+
+def plan_rebuild(
+    *,
+    settings: AppSettings,
+    files: list[Path],
+    content_dir: Path,
+    existing_manifest: KnowledgeBaseBuildManifest | None,
+    chunk_size: int,
+    chunk_overlap: int,
+    embedding_model: str,
+    metadata_path: Path,
+    vector_store_dir: Path,
+    chunk_cache_dir: Path,
+) -> tuple[list[FileBuildPlan], list[BuildManifestEntry], str]:
+    previous_entries = {entry.relative_path: entry for entry in (existing_manifest.files if existing_manifest else [])}
+    current_relative_paths = {path.relative_to(content_dir).as_posix() for path in files}
+    deleted_entries = [
+        entry for relative_path, entry in previous_entries.items() if relative_path not in current_relative_paths
+    ]
+    config_changed = (
+        existing_manifest is None
+        or existing_manifest.chunk_size != chunk_size
+        or existing_manifest.chunk_overlap != chunk_overlap
+        or existing_manifest.embedding_model != embedding_model
+        or existing_manifest.text_splitter_name != settings.kb.TEXT_SPLITTER_NAME
+        or existing_manifest.vector_store_type != settings.kb.DEFAULT_VS_TYPE
+    )
+    can_use_incremental = (
+        settings.kb.ENABLE_INCREMENTAL_REBUILD
+        and existing_manifest is not None
+        and vector_store_index_exists(vector_store_dir, settings.kb.DEFAULT_VS_TYPE)
+        and metadata_path.exists()
+        and not config_changed
+    )
+    plans: list[FileBuildPlan] = []
+    for path in files:
+        relative_path = path.relative_to(content_dir).as_posix()
+        stat = path.stat()
+        snapshot = FileSnapshot(
+            path=path,
+            relative_path=relative_path,
+            size_bytes=stat.st_size,
+            modified_at=stat.st_mtime,
+            extension=path.suffix.lower(),
+        )
+        previous_entry = previous_entries.get(relative_path)
+        if not can_use_incremental or previous_entry is None:
+            change_kind: Literal["new", "modified"] = "new" if previous_entry is None else "modified"
+            plans.append(FileBuildPlan(snapshot=snapshot, change_kind=change_kind, manifest_entry=previous_entry))
+            continue
+        cache_path = chunk_cache_dir / previous_entry.cache_file
+        if not cache_path.exists() or not settings.kb.ENABLE_FILE_HASH_CACHE:
+            plans.append(FileBuildPlan(snapshot=snapshot, change_kind="modified", manifest_entry=previous_entry))
+            continue
+        if previous_entry.size_bytes == snapshot.size_bytes and abs(previous_entry.modified_at - snapshot.modified_at) < 1e-6:
+            plans.append(
+                FileBuildPlan(
+                    snapshot=snapshot,
+                    change_kind="reuse",
+                    manifest_entry=previous_entry.model_copy(update={"source_path": str(path.resolve())}),
+                )
+            )
+            continue
+        snapshot.sha256 = compute_file_sha256(path)
+        if snapshot.sha256 == previous_entry.sha256:
+            plans.append(
+                FileBuildPlan(
+                    snapshot=snapshot,
+                    change_kind="reuse",
+                    manifest_entry=previous_entry.model_copy(
+                        update={
+                            "source_path": str(path.resolve()),
+                            "size_bytes": snapshot.size_bytes,
+                            "modified_at": snapshot.modified_at,
+                        }
+                    ),
+                )
+            )
+            continue
+        plans.append(FileBuildPlan(snapshot=snapshot, change_kind="modified", manifest_entry=previous_entry))
+    if not can_use_incremental:
+        return plans, deleted_entries, "full"
+    rebuild_kinds = {plan.change_kind for plan in plans if plan.change_kind != "reuse"}
+    if not rebuild_kinds and not deleted_entries:
+        return plans, deleted_entries, "reuse"
+    if deleted_entries or "modified" in rebuild_kinds or not settings.kb.ENABLE_APPEND_INDEX:
+        return plans, deleted_entries, "full"
+    return plans, deleted_entries, "append"
+
+
+def build_caches_for_plans(
+    *,
+    settings: AppSettings,
+    content_dir: Path,
+    plans: list[FileBuildPlan],
+    chunk_size: int,
+    chunk_overlap: int,
+    chunk_cache_dir: Path,
+    embedding_model: str,
+) -> BuildCachesResult:
+    if not plans:
+        return BuildCachesResult(
+            outputs={},
+            stage_timings={"document_load": 0.0, "text_split": 0.0, "embedding": 0.0},
+        )
+    assembler = EmbeddingAssembler(
+        settings,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embedding_model=embedding_model,
+        text_splitter_name=settings.kb.TEXT_SPLITTER_NAME,
+        vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+    )
+    started_at = perf_counter()
+    file_documents = assembler.load_paths(
+        content_dir=content_dir,
+        paths=[plan.snapshot.path for plan in plans],
+        workers=settings.kb.DOC_PARSE_WORKERS,
+    )
+    document_load_seconds = round(perf_counter() - started_at, 4)
+    chunk_batches: dict[str, list] = {}
+    entries_by_owner: dict[str, list[VectorStoreEntry]] = {}
+    started_at = perf_counter()
+    for plan in plans:
+        documents = file_documents[plan.snapshot.relative_path]
+        chunks, _ = assembler.split_loaded_documents(documents)
+        chunk_batches[plan.snapshot.relative_path] = chunks
+    text_split_seconds = round(perf_counter() - started_at, 4)
+    started_at = perf_counter()
+    for plan in plans:
+        entries_by_owner[plan.snapshot.relative_path] = assembler.embed_chunks(
+            chunk_batches[plan.snapshot.relative_path]
+        )
+    embedding_seconds = round(perf_counter() - started_at, 4) if chunk_batches else 0.0
+    built: dict[str, tuple[BuildManifestEntry, FileChunkCache]] = {}
+    for plan in plans:
+        chunks = chunk_batches[plan.snapshot.relative_path]
+        snapshot = plan.snapshot
+        snapshot.sha256 = snapshot.sha256 or compute_file_sha256(snapshot.path)
+        cache_file = chunk_cache_filename(snapshot.relative_path)
+        chunk_entries = [
+            CachedChunkEntry(
+                chunk_id=entry.chunk_id,
+                page_content=entry.page_content,
+                metadata=dict(entry.metadata),
+                embedding=entry.embedding,
+                content_sha256=hash_text(entry.page_content),
+            )
+            for entry in entries_by_owner.get(snapshot.relative_path, [])
+        ]
+        cache = FileChunkCache(
+            relative_path=snapshot.relative_path,
+            source_path=str(snapshot.path.resolve()),
+            extension=snapshot.extension,
+            size_bytes=snapshot.size_bytes,
+            modified_at=snapshot.modified_at,
+            sha256=snapshot.sha256,
+            raw_documents=len(file_documents[snapshot.relative_path]),
+            chunks=len(chunks),
+            chunk_entries=chunk_entries,
+        )
+        if settings.kb.ENABLE_CHUNK_CACHE:
+            write_chunk_cache(chunk_cache_dir / cache_file, cache)
+        manifest_entry = BuildManifestEntry(
+            relative_path=snapshot.relative_path,
+            source_path=str(snapshot.path.resolve()),
+            extension=snapshot.extension,
+            size_bytes=snapshot.size_bytes,
+            modified_at=snapshot.modified_at,
+            sha256=snapshot.sha256,
+            raw_documents=cache.raw_documents,
+            chunks=cache.chunks,
+            cache_file=cache_file,
+        )
+        built[snapshot.relative_path] = (manifest_entry, cache)
+    return BuildCachesResult(
+        outputs=built,
+        stage_timings={
+            "document_load": document_load_seconds,
+            "text_split": text_split_seconds,
+            "embedding": embedding_seconds,
+        },
+    )
+def load_cached_caches_for_plans(
+    plans: list[FileBuildPlan],
+    chunk_cache_dir: Path,
+) -> list[FileChunkCache]:
+    caches: list[FileChunkCache] = []
+    for plan in plans:
+        if plan.manifest_entry is None:
+            continue
+        cache_path = chunk_cache_dir / plan.manifest_entry.cache_file
+        if not cache_path.exists():
+            raise FileNotFoundError(f"切片缓存不存在: {cache_path}")
+        caches.append(load_chunk_cache(cache_path))
+    return caches
+
+
+def build_manifest_from_plans(
+    *,
+    knowledge_base_name: str,
+    plans: list[FileBuildPlan],
+    chunk_size: int,
+    chunk_overlap: int,
+    embedding_model: str,
+    text_splitter_name: str,
+    vector_store_type: str,
+    rebuilt_outputs: dict[str, tuple[BuildManifestEntry, FileChunkCache]] | None = None,
+) -> KnowledgeBaseBuildManifest:
+    entries: list[BuildManifestEntry] = []
+    for plan in sorted(plans, key=lambda item: item.snapshot.relative_path):
+        if rebuilt_outputs and plan.snapshot.relative_path in rebuilt_outputs:
+            entries.append(rebuilt_outputs[plan.snapshot.relative_path][0])
+        elif plan.manifest_entry is not None:
+            entries.append(plan.manifest_entry)
+    return KnowledgeBaseBuildManifest(
+        knowledge_base_name=knowledge_base_name,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embedding_model=embedding_model,
+        text_splitter_name=text_splitter_name,
+        vector_store_type=vector_store_type,
+        built_at=datetime.now(UTC),
+        files_total=len(entries),
+        raw_documents_total=sum(entry.raw_documents for entry in entries),
+        chunks_total=sum(entry.chunks for entry in entries),
+        files=entries,
+    )
+
+
+def flatten_chunk_entries(caches: list[FileChunkCache]) -> list[CachedChunkEntry]:
+    entries: list[CachedChunkEntry] = []
+    for cache in caches:
+        entries.extend(cache.chunk_entries)
+    return entries
+
+
+def chunk_entry_to_record(entry: CachedChunkEntry) -> DocumentChunkRecord:
+    page = entry.metadata.get("page")
+    page_value = int(page) if page is not None else None
+    page_end = entry.metadata.get("page_end")
+    page_end_value = int(page_end) if page_end is not None else None
+    section_index = entry.metadata.get("section_index")
+    section_index_value = int(section_index) if section_index is not None else None
+    return DocumentChunkRecord(
+        chunk_id=entry.chunk_id,
+        doc_id=str(entry.metadata.get("doc_id", "")),
+        source=str(entry.metadata.get("source", "")),
+        source_path=str(entry.metadata.get("source_path", "")),
+        extension=str(entry.metadata.get("extension", "")),
+        chunk_index=int(entry.metadata.get("chunk_index", 0)),
+        page=page_value,
+        page_end=page_end_value,
+        title=entry.metadata.get("title"),
+        section_title=entry.metadata.get("section_title"),
+        section_path=entry.metadata.get("section_path"),
+        section_index=section_index_value,
+        content_type=_coerce_optional_text(entry.metadata.get("content_type")),
+        source_modality=_coerce_optional_text(entry.metadata.get("source_modality")),
+        original_file_type=_coerce_optional_text(entry.metadata.get("original_file_type")),
+        ocr_text=_coerce_optional_text(entry.metadata.get("ocr_text")),
+        image_caption=_coerce_optional_text(entry.metadata.get("image_caption")),
+        evidence_summary=_coerce_optional_text(entry.metadata.get("evidence_summary")),
+        headers=extract_header_metadata(entry.metadata),
+        content_length=len(entry.page_content),
+        content_preview=entry.page_content[:120],
+    )
+
+
+def load_build_manifest(path: Path) -> KnowledgeBaseBuildManifest | None:
+    if not path.exists():
+        return None
+    return KnowledgeBaseBuildManifest.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def write_build_manifest(path: Path, manifest: KnowledgeBaseBuildManifest) -> None:
+    path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+
+
+def load_chunk_cache(path: Path) -> FileChunkCache:
+    return FileChunkCache.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def write_chunk_cache(path: Path, cache: FileChunkCache) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(cache.model_dump_json(indent=2), encoding="utf-8")
+
+
+def load_metadata_records(path: Path) -> list[DocumentChunkRecord]:
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return [DocumentChunkRecord.model_validate(item) for item in payload]
+
+
+def write_metadata_records(path: Path, records: list[DocumentChunkRecord]) -> None:
+    path.write_text(
+        json.dumps([record.model_dump() for record in records], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def cleanup_deleted_caches(chunk_cache_dir: Path, deleted_entries: list[BuildManifestEntry]) -> None:
+    for entry in deleted_entries:
+        cache_path = chunk_cache_dir / entry.cache_file
+        if cache_path.exists():
+            cache_path.unlink(missing_ok=True)
+
+
+def chunk_cache_filename(relative_path: str) -> str:
+    return f"{sha1(relative_path.encode('utf-8')).hexdigest()[:20]}.json"
+
+
+def compute_file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def hash_text(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def _coerce_optional_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None
+
+
+def cached_entry_to_vector_entry(entry: CachedChunkEntry) -> VectorStoreEntry:
+    return VectorStoreEntry(
+        chunk_id=entry.chunk_id,
+        page_content=entry.page_content,
+        metadata=dict(entry.metadata),
+        embedding=list(entry.embedding),
+    )
