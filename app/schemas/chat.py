@@ -46,6 +46,18 @@ class RetrievedReference(RetrievedDoc):
     model_config = ConfigDict(extra="forbid")
 
 
+class ReferenceOverview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reference_count: int = 0
+    text_count: int = 0
+    image_side_count: int = 0
+    multimodal_count: int = 0
+    has_joint_text_image_coverage: bool = False
+    source_modality_counts: dict[str, int] = Field(default_factory=dict)
+    evidence_type_counts: dict[str, int] = Field(default_factory=dict)
+
+
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -65,6 +77,7 @@ class ChatResponse(BaseModel):
 
     answer: str
     references: list[RetrievedReference]
+    reference_overview: ReferenceOverview = Field(default_factory=ReferenceOverview)
     source_type: str
     knowledge_base_name: str
     used_context: bool
@@ -123,6 +136,7 @@ class AgentChatResponse(BaseModel):
     tool_calls: list[ToolCallRecord]
     steps: list[AgentStepRecord]
     references: list[RetrievedReference]
+    reference_overview: ReferenceOverview = Field(default_factory=ReferenceOverview)
     knowledge_base_name: str
     used_tools: bool
     stream: bool

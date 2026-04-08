@@ -32,14 +32,23 @@ def rebuild_knowledge_base(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     embedding_model: str | None = None,
+    enable_image_vlm_for_build: bool = False,
+    force_full_rebuild: bool = False,
 ) -> RebuildKnowledgeBaseResult:
-    content_dir, vector_store_dir = ensure_knowledge_base_layout(settings, knowledge_base_name)
-    resolved_chunk_size = chunk_size or settings.kb.CHUNK_SIZE
-    resolved_chunk_overlap = chunk_overlap if chunk_overlap is not None else settings.kb.CHUNK_OVERLAP
-    resolved_embedding_model = embedding_model or settings.model.DEFAULT_EMBEDDING_MODEL
+    effective_settings = build_rebuild_settings(
+        settings,
+        enable_image_vlm_for_build=enable_image_vlm_for_build,
+        force_full_rebuild=force_full_rebuild,
+    )
+    content_dir, vector_store_dir = ensure_knowledge_base_layout(effective_settings, knowledge_base_name)
+    resolved_chunk_size = chunk_size or effective_settings.kb.CHUNK_SIZE
+    resolved_chunk_overlap = (
+        chunk_overlap if chunk_overlap is not None else effective_settings.kb.CHUNK_OVERLAP
+    )
+    resolved_embedding_model = embedding_model or effective_settings.model.DEFAULT_EMBEDDING_MODEL
 
-    return rebuild_incremental_knowledge_base(
-        settings=settings,
+    result = rebuild_incremental_knowledge_base(
+        settings=effective_settings,
         knowledge_base_name=knowledge_base_name,
         content_dir=content_dir,
         vector_store_dir=vector_store_dir,
@@ -47,6 +56,41 @@ def rebuild_knowledge_base(
         chunk_overlap=resolved_chunk_overlap,
         embedding_model=resolved_embedding_model,
     )
+    return result.model_copy(
+        update={
+            "image_vlm_enabled_for_build": enable_image_vlm_for_build,
+            "force_full_rebuild": force_full_rebuild,
+        }
+    )
+
+
+def build_rebuild_settings(
+    settings: AppSettings,
+    *,
+    enable_image_vlm_for_build: bool = False,
+    force_full_rebuild: bool = False,
+) -> AppSettings:
+    kb_updates: dict[str, object] = {}
+    model_updates: dict[str, object] = {}
+
+    if force_full_rebuild or enable_image_vlm_for_build:
+        kb_updates["ENABLE_INCREMENTAL_REBUILD"] = False
+
+    if enable_image_vlm_for_build:
+        model_updates["IMAGE_VLM_ENABLED"] = True
+        model_updates["IMAGE_VLM_AUTO_CAPTION_ENABLED"] = True
+        model_updates["IMAGE_VLM_AUTO_TRIGGER_BY_OCR"] = False
+        model_updates["IMAGE_VLM_ONLY_WHEN_OCR_EMPTY"] = False
+
+    if not kb_updates and not model_updates:
+        return settings
+
+    updates: dict[str, object] = {}
+    if kb_updates:
+        updates["kb"] = settings.kb.model_copy(update=kb_updates)
+    if model_updates:
+        updates["model"] = settings.model.model_copy(update=model_updates)
+    return settings.model_copy(update=updates)
 
 
 def list_knowledge_bases(settings: AppSettings) -> list[KnowledgeBaseSummary]:
@@ -183,6 +227,8 @@ def upload_local_files(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     embedding_model: str | None = None,
+    enable_image_vlm_for_build: bool = False,
+    force_full_rebuild: bool = False,
 ) -> KnowledgeBaseUploadResponse:
     normalized_name = knowledge_base_name.strip()
     if not normalized_name:
@@ -210,6 +256,8 @@ def upload_local_files(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             embedding_model=embedding_model,
+            enable_image_vlm_for_build=enable_image_vlm_for_build,
+            force_full_rebuild=force_full_rebuild,
         )
         metadata_path = rebuild_result.metadata_path
 
@@ -255,6 +303,8 @@ def render_rebuild_summary(result: RebuildKnowledgeBaseResult) -> str:
         f"复用切片数: {result.chunks_reused}",
         f"新增向量切片数: {result.chunks_embedded}",
         f"向量存储类型: {result.vector_store_type}",
+        f"本次启用图片 VLM: {'是' if result.image_vlm_enabled_for_build else '否'}",
+        f"本次强制全量重建: {'是' if result.force_full_rebuild else '否'}",
     ]
     if result.stage_timings_seconds:
         lines.append("阶段耗时(秒):")

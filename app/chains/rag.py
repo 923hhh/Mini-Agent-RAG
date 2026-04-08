@@ -246,6 +246,10 @@ def append_answer_trace(
     source_modalities = count_reference_attribute(references, "source_modality")
     evidence_types = count_reference_attribute(references, "evidence_type")
     context_groups = count_context_groups(references)
+    has_text_context = context_groups.get("text", 0) > 0
+    has_image_context = (
+        context_groups.get("ocr", 0) > 0 or context_groups.get("vision", 0) > 0
+    )
     append_jsonl_trace(
         settings,
         "answer_trace",
@@ -257,8 +261,11 @@ def append_answer_trace(
             "source_modalities": source_modalities,
             "evidence_types": evidence_types,
             "context_groups": context_groups,
+            "has_text_evidence": has_text_context,
             "has_ocr_evidence": "ocr" in source_modalities or "ocr+vision" in source_modalities,
             "has_vision_evidence": "vision" in source_modalities or "ocr+vision" in source_modalities or "image" in source_modalities,
+            "has_image_side_evidence": has_image_context,
+            "has_joint_text_image_evidence": has_text_context and has_image_context,
             "has_multimodal_context": len([key for key, value in context_groups.items() if value > 0]) >= 2,
             "answer_preview": answer[:240],
         },

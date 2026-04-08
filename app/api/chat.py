@@ -12,6 +12,7 @@ from app.chains.rag import generate_rag_answer
 from app.chains.rag import stream_rag_answer
 from app.retrievers.local_kb import search_local_knowledge_base, search_temp_knowledge_base
 from app.schemas.chat import AgentChatRequest, AgentChatResponse, ChatRequest, ChatResponse
+from app.services.reference_overview import build_reference_overview
 from app.services.settings import load_settings
 from app.services.temp_kb_service import TempKnowledgeBaseExpiredError
 
@@ -92,6 +93,8 @@ def rag_stream_response(
     references,
     target_name: str,
 ) -> StreamingResponse:
+    reference_overview = build_reference_overview(references)
+
     def event_stream():
         answer_parts: list[str] = []
         try:
@@ -112,6 +115,7 @@ def rag_stream_response(
                 {
                     "answer": "".join(answer_parts),
                     "references": [item.model_dump() for item in references],
+                    "reference_overview": reference_overview.model_dump(),
                     "source_type": request.source_type,
                     "knowledge_base_name": target_name,
                     "used_context": bool(references),
@@ -169,6 +173,7 @@ def rag_chat(request: ChatRequest):
     return ChatResponse(
         answer=answer,
         references=references,
+        reference_overview=build_reference_overview(references),
         source_type=request.source_type,
         knowledge_base_name=target_name,
         used_context=bool(references),

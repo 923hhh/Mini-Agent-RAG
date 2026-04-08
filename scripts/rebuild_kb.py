@@ -28,6 +28,16 @@ def parse_args() -> argparse.Namespace:
         help="Override embedding model name configured in model_settings.yaml.",
     )
     parser.add_argument(
+        "--enable-image-vlm-for-build",
+        action="store_true",
+        help="Enable image VLM captioning for this rebuild only, and force a full rebuild.",
+    )
+    parser.add_argument(
+        "--force-full-rebuild",
+        action="store_true",
+        help="Force a full rebuild for this run and ignore incremental reuse.",
+    )
+    parser.add_argument(
         "--project-root",
         type=Path,
         default=PROJECT_ROOT,
@@ -48,6 +58,8 @@ def main() -> int:
             chunk_size=args.chunk_size,
             chunk_overlap=args.chunk_overlap,
             embedding_model=args.embedding_model,
+            enable_image_vlm_for_build=args.enable_image_vlm_for_build,
+            force_full_rebuild=args.force_full_rebuild,
         )
     except Exception as exc:
         print(f"知识库重建失败: {exc}", file=sys.stderr)

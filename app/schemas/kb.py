@@ -24,6 +24,7 @@ class DocumentChunk(BaseModel):
     source_modality: str | None = None
     original_file_type: str | None = None
     ocr_text: str | None = None
+    ocr_language: str | None = None
     image_caption: str | None = None
     evidence_summary: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
@@ -55,6 +56,8 @@ class RebuildKnowledgeBaseResult(BaseModel):
     chunks_reused: int = 0
     chunks_embedded: int = 0
     vector_store_type: str = "faiss"
+    image_vlm_enabled_for_build: bool = False
+    force_full_rebuild: bool = False
     stage_timings_seconds: dict[str, float] = Field(default_factory=dict)
 
 
@@ -65,6 +68,8 @@ class RebuildKnowledgeBaseRequest(BaseModel):
     chunk_size: int | None = Field(default=None, ge=1)
     chunk_overlap: int | None = Field(default=None, ge=0)
     embedding_model: str | None = None
+    enable_image_vlm_for_build: bool = False
+    force_full_rebuild: bool = False
 
 
 class KnowledgeBaseSummary(BaseModel):

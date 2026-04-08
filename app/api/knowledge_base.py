@@ -33,6 +33,8 @@ def upload_knowledge_base_files(
     auto_rebuild: bool = Form(default=False),
     chunk_size: int | None = Form(default=None),
     chunk_overlap: int | None = Form(default=None),
+    enable_image_vlm_for_build: bool = Form(default=False),
+    force_full_rebuild: bool = Form(default=False),
 ) -> KnowledgeBaseUploadResponse:
     if scope not in {"temp", "local"}:
         raise HTTPException(
@@ -69,6 +71,8 @@ def upload_knowledge_base_files(
             auto_rebuild=auto_rebuild,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            enable_image_vlm_for_build=enable_image_vlm_for_build,
+            force_full_rebuild=force_full_rebuild,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -96,6 +100,8 @@ def rebuild_local_knowledge_base(
             chunk_size=request.chunk_size,
             chunk_overlap=request.chunk_overlap,
             embedding_model=request.embedding_model,
+            enable_image_vlm_for_build=request.enable_image_vlm_for_build,
+            force_full_rebuild=request.force_full_rebuild,
         )
     except ValueError as exc:
         raise HTTPException(

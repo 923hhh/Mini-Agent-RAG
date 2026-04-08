@@ -184,6 +184,7 @@ def attach_chunk_metadata(chunks: list[Document]) -> list[DocumentChunkRecord]:
                 source_modality=_coerce_optional_text(chunk.metadata.get("source_modality")),
                 original_file_type=_coerce_optional_text(chunk.metadata.get("original_file_type")),
                 ocr_text=_coerce_optional_text(chunk.metadata.get("ocr_text")),
+                ocr_language=_coerce_optional_text(chunk.metadata.get("ocr_language")),
                 image_caption=_coerce_optional_text(chunk.metadata.get("image_caption")),
                 evidence_summary=_coerce_optional_text(chunk.metadata.get("evidence_summary")),
                 headers=headers,

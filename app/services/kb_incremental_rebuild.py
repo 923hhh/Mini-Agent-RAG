@@ -536,6 +536,7 @@ def chunk_entry_to_record(entry: CachedChunkEntry) -> DocumentChunkRecord:
         source_modality=_coerce_optional_text(entry.metadata.get("source_modality")),
         original_file_type=_coerce_optional_text(entry.metadata.get("original_file_type")),
         ocr_text=_coerce_optional_text(entry.metadata.get("ocr_text")),
+        ocr_language=_coerce_optional_text(entry.metadata.get("ocr_language")),
         image_caption=_coerce_optional_text(entry.metadata.get("image_caption")),
         evidence_summary=_coerce_optional_text(entry.metadata.get("evidence_summary")),
         headers=extract_header_metadata(entry.metadata),

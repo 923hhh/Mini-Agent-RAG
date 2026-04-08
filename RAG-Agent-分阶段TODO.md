@@ -1278,8 +1278,8 @@ Phase 0 到 Phase 7 解决的是“RAG + Agent 基础闭环”，后续增强不
 
 - [ ] 检索结果中可区分不同模态来源，不再只返回一组混合 chunk。
 - [ ] 图片相关问题时，OCR 和视觉描述命中率高于正文通道。
-- [ ] 图文联合问题时，至少可同时返回两类不同来源的证据。
-- [ ] 保持现有 `search_local_knowledge` 以及 `/chat/rag` 接口不变。
+- [x] 图文联合问题时，至少可同时返回两类不同来源的证据。
+- [x] 保持现有 `search_local_knowledge` 以及 `/chat/rag` 接口不变。
 
 #### 验证方式
 
@@ -1302,6 +1302,8 @@ Phase 0 到 Phase 7 解决的是“RAG + Agent 基础闭环”，后续增强不
 - [x] 已增加图片类问题的查询扩展逻辑，会自动补充 `图片内容 / 图像描述 / 图片文字` 等检索词。
 - [x] 已在图片 loader 中过滤明显无效的拒答式视觉描述，避免把低质量 caption 写入知识库。
 - [x] 已在排序阶段加入文件类型、模态类型和标题路径命中偏置，用于降低无关 chunk 干扰。
+- [x] 已在联合问题的启发式重排阶段加入模态保底，避免图片侧候选在进入 rerank 前就被截断。
+- [x] 当前 `multimodal_joint` 评测的 `modality_presence_accuracy` 已从 `0.0` 提升到 `1.0`，可以稳定返回文本证据和图片侧证据。
 
 ### Next Phase J 证据感知回答与可解释引用
 
@@ -1351,7 +1353,9 @@ Phase 0 到 Phase 7 解决的是“RAG + Agent 基础闭环”，后续增强不
 - [x] 当前未改动 `/chat/rag` 接口结构，已存在的 `source_modality / ocr_text / image_caption / evidence_summary` 字段继续透传到回答链路。
 - [x] `RetrievedReference` 已新增 `evidence_type` 与 `used_for_answer` 字段，检索返回会直接标明证据类型与是否参与回答。
 - [x] `Streamlit` 引用面板已展示 `evidence_type / used_for_answer / source_modality`，便于人工核查证据来源。
+- [x] `Streamlit` 引用区域已新增“证据概览”，可直接看到文本证据数、图片侧证据数、联合覆盖状态，以及 `source_modality / evidence_type` 分布。
 - [x] 回答链路已新增图片类问题专用系统提示词，并依据查询特征与证据模态分布在“普通 RAG Prompt / 图片类 RAG Prompt”之间自动切换。
+- [x] `answer_trace.jsonl` 已补充 `has_text_evidence / has_image_side_evidence / has_joint_text_image_evidence`，便于核查本次回答是否真正使用了图文联合上下文。
 
 ### Next Phase K 多模态评测与检索观测
 
@@ -1409,6 +1413,8 @@ Phase 0 到 Phase 7 解决的是“RAG + Agent 基础闭环”，后续增强不
 - [x] 已新增 `data/eval/multimodal_failure_cases.jsonl`，记录当前已知弱项与失败原因。
 - [x] `app/retrievers/local_kb.py` 已增加 `retrieval_trace.jsonl` 观测，当前会记录查询类型、可用模态、候选数、最终证据模态分布等信息。
 - [x] `app/chains/rag.py` 已增加 `answer_trace.jsonl` 观测，当前会记录 `prompt_kind`、证据类型分布、是否命中 OCR / 视觉描述上下文等信息。
+- [x] `app/services/reference_overview.py` 已新增统一证据概览汇总逻辑，`/chat/rag`、`/chat/agent` 以及流式 `done` 事件会返回 `reference_overview`。
+- [x] `Streamlit` 已优先消费服务端返回的 `reference_overview`，确保 UI 证据概览与 API / trace 使用同一套统计口径。
 - [x] `python .\\scripts\\eval_retrieval.py --case-file .\\data\\eval\\multimodal_rag_eval.jsonl` 已完成实测，当前结果为：
   - `Hit@K = 0.75`
   - `MRR = 0.6875`

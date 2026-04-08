@@ -30,7 +30,7 @@
 - 向量检索：`FAISS`
 - 模型接入：`Ollama`、OpenAI-compatible API
 - 文档解析：`PyPDF`、`python-docx`、`docx2txt`、`markdown`、`beautifulsoup4`、`ebooklib`
-- OCR / 图片处理：`pytesseract`、`Pillow`、`PyMuPDF`
+- OCR / 图片处理：`pytesseract`、`Pillow`、`PyMuPDF`，并已接入 `PaddleOCR` 双后端抽象
 - 重排模型：`sentence-transformers`
 
 从依赖可以看出，这个项目默认优先支持本地部署和本地数据处理，同时保留接入外部兼容接口的能力。
@@ -113,7 +113,13 @@ Mini-Agent-RAG2/
 - 检索参数独立
 - 模型接入独立
 
-同时，UI 已支持直接修改部分 OCR / VLM 配置并回写 YAML。
+同时，UI 已支持直接修改部分 OCR / VLM 配置并回写 YAML。当前除了基础 OCR 开关、Tesseract 路径和视觉模型参数外，还能配置：
+
+- OCR 主后端
+- 说明书页补充后端
+- `PaddleOCR` 语言、方向分类、检测长边限制、最低识别分数
+
+在当前默认配置下，图片视觉模型自动 caption 已关闭，优先保证图片入库速度；若某次重建确实需要补齐视觉描述，可以在重建时临时启用图片 VLM，而不必长期打开全局自动 caption。
 
 ### 5.3 知识库入库链路
 
@@ -147,6 +153,7 @@ Mini-Agent-RAG2/
 - `source_modality`
 - `original_file_type`
 - `ocr_text`
+- `ocr_language`
 - `image_caption`
 - `evidence_summary`
 - `title / section_title / section_path / page`
@@ -247,19 +254,27 @@ Agent 能做的事情包括：
 
 项目支持将图片作为知识库输入。相关逻辑分散在图片加载、OCR 和 `app/services/image_caption_service.py`。
 
-当前策略是：
+当前策略已经不是“整图 OCR + 单句 caption”的早期做法，而是面向多模态 RAG 做了更细的拆分：
 
-- 先尝试 OCR 提取图片文字
-- 根据配置决定是否调用视觉模型生成描述
-- 过滤明显无效的拒答式视觉描述
-- 将 OCR、视觉描述、融合摘要和文件信息分别写入结构化元数据
+- OCR 已抽成双后端入口，保留 `Tesseract` 主链路，并支持按说明书页特征切换到 `PaddleOCR`
+- 说明书 / 维修手册页会额外抽取步骤类证据，而不是只保留整图文字
+- 根据配置决定是否调用视觉模型生成结构化 caption
+- 将整图 caption 解析为摘要、场景、主体对象、文字线索、动作状态、不确定点
+- 对图片上半区 / 中部区域 / 下半区生成区域级 caption
+- 对说明书页中的配图再生成专门的视觉证据，必要时继续尝试箭头 / 局部图区域
+- 过滤明显无效的拒答式、违规式视觉描述
+- 对超大图在 OCR、区域裁剪、VLM 前统一做安全缩放，并压掉 `DecompressionBombWarning`
+- 将 OCR、整图结构化描述、区域级描述、说明书页步骤、配图描述、融合摘要和文件信息分别写入结构化元数据与视觉 chunk
 
-图片 chunk 当前会区分几类来源：
+图片与说明书页 chunk 当前会区分几类来源与内容类型：
 
 - `ocr`
 - `vision`
 - `ocr+vision`
 - `image`
+- `instruction_text_evidence`
+- `instruction_figure_evidence`
+- `instruction_arrow_evidence`
 
 同时回答与引用阶段还能继续透传：
 
@@ -267,13 +282,24 @@ Agent 能做的事情包括：
 - `evidence_type`
 - `used_for_answer`
 
+当前 API 返回和流式 `done` 事件里还会补充 `reference_overview`，用于总结：
+
+- 文本证据数量
+- 图片侧证据数量
+- 是否形成图文联合覆盖
+- `source_modality / evidence_type` 分布
+
 UI 中已经提供了 OCR 与 VLM 的独立配置项，例如：
 
+- OCR 主后端 / 说明书页补充后端
 - Tesseract 路径
-- OCR 语言包
+- Tesseract 语言包
+- `PaddleOCR` 语言、方向分类、检测长边上限、最低识别分数
 - OCR 置信度阈值
 - VLM Base URL / API Key / Model
 - 是否在 OCR 足够丰富时跳过视觉模型
+
+另外，当前图片 caption 链路已切换为更稳定的 OpenAI-compatible `chat_completions` 风格调用，避免部分视觉模型只产出 reasoning 而不返回正式正文，降低“有理解、无可解析输出”的情况。
 
 这部分能力比较适合处理：
 
@@ -283,6 +309,38 @@ UI 中已经提供了 OCR 与 VLM 的独立配置项，例如：
 - 需要简单视觉补充说明的图片材料
 - 图文混合知识源的教学型多模态 RAG 实验
 
+相比早期“一张图只生成一条自然语言 caption”的做法，当前实现更适合检索阶段复用，因为：
+
+- 整图结构化描述更利于稳定提取关键词
+- 区域级描述可以提升局部内容的命中率
+- 图片不再只以单个视觉字段参与检索，而是具备“主视觉证据 + 区域视觉证据”的双层组织
+- 说明书页不再只是普通图片，而会补出“步骤证据 + 配图证据”的专门 chunk
+- `ocr_language` 会按实际使用后端写回元数据，便于排查 OCR 来源
+
+### 5.8 多模态证据可观测性
+
+为了让多模态 RAG 的优化不只停留在“感觉是否变好”，项目已经补了一层轻量可观测性，主要体现在三个位置：
+
+- 检索阶段会写入 `retrieval_trace.jsonl`
+- 回答阶段会写入 `answer_trace.jsonl`
+- API 与 UI 会同步展示 `reference_overview`
+- `scripts/eval_retrieval.py` 已支持多模态评测样例与失败案例回放
+
+其中：
+
+- `retrieval_trace.jsonl` 记录查询类型、候选数量、候选模态分布、最终引用模态分布
+- `answer_trace.jsonl` 记录回答使用的 prompt 类型、证据类型分布，以及是否同时命中文本证据和图片侧证据
+- `reference_overview` 会在 `/chat/rag`、`/chat/agent` 以及流式 `done` 事件里返回，便于前端直接展示“文本证据数 / 图片侧证据数 / 联合覆盖状态”
+- `data/eval/` 中已补充多模态评测集和失败案例库，便于针对 `image_ocr / image_vision / multimodal_joint` 做回归对比
+
+在 `Streamlit` 控制台里，引用区域现在不仅能展开每条引用，还会先显示一块“证据概览”，让用户快速判断：
+
+- 当前回答是否真的用了图片侧证据
+- 当前是否形成了图文联合覆盖
+- 当前引用更偏 `text / ocr / vision / multimodal` 的哪一类
+
+这部分能力的意义不是提高模型上限，而是降低调试成本，让开发者能更快判断问题究竟出在入库、检索、重排还是回答组织阶段。
+
 ## 6. 运行方式
 
 项目通过脚本启动，入口比较明确。
@@ -290,7 +348,7 @@ UI 中已经提供了 OCR 与 VLM 的独立配置项，例如：
 ### 6.1 启动 API
 
 ```powershell
-python .\scripts\start_api.py
+.\.venv\Scripts\python.exe .\scripts\start_api.py
 ```
 
 默认会：
@@ -299,10 +357,12 @@ python .\scripts\start_api.py
 - 在启动前尝试清理过期临时知识库
 - 启动 FastAPI 服务
 
+如果当前终端已经手动激活了 `.venv`，也可以直接使用 `python .\scripts\start_api.py`。推荐显式使用 `.venv\Scripts\python.exe`，避免误用系统 Python 或 Anaconda 环境。
+
 ### 6.2 启动 UI
 
 ```powershell
-python .\scripts\start_ui.py
+.\.venv\Scripts\python.exe .\scripts\start_ui.py
 ```
 
 默认会：
@@ -322,6 +382,12 @@ python .\scripts\start_ui.py
 5. 在 RAG 对话页进行问答
 6. 在 Agent 对话页测试工具闭环
 
+如果某个知识库里的图片确实需要补齐视觉描述，可以在命令行重建时临时打开图片 VLM，例如：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\rebuild_kb.py --kb-name test3 --enable-image-vlm-for-build --force-full-rebuild
+```
+
 ## 7. 数据组织方式
 
 项目的数据目录设计比较直观：
@@ -332,6 +398,10 @@ python .\scripts\start_ui.py
   存放知识库向量索引和元数据
 - `data/temp/<knowledge_id>/`
   存放临时知识库文件和临时向量索引
+- `data/logs/`
+  存放 `retrieval_trace.jsonl`、`answer_trace.jsonl`、`image_caption_trace.jsonl` 等调试日志
+- `data/eval/`
+  存放多模态评测集、失败案例和回归测试样本
 - `data/models/`
   存放本地模型文件，如 reranker
 - `data/tools/`
@@ -350,7 +420,11 @@ python .\scripts\start_ui.py
 - 已加入图片 OCR / VLM 入库能力，具备一定多模态扩展性
 - 已支持 `epub` 文档入库，并能按章节保留结构信息
 - 已支持多模态结构化元数据、按模态分路召回和证据感知回答
+- 已支持说明书页模式，能把步骤文字与配图证据拆开入库
+- 已接入 OCR 双后端抽象，支持 `Tesseract + PaddleOCR` 的增量切换方案
+- 已对超大图做 OCR / 区域裁剪 / VLM 前安全缩放
 - 引用区可区分 `text / ocr / vision / multimodal` 等证据类型
+- 已具备基础多模态评测与 trace 观测能力，可回看检索分布、回答证据和图片 caption 行为
 - 配置与数据目录分离，便于本地实验
 
 ## 9. 当前局限与后续方向
@@ -364,7 +438,9 @@ python .\scripts\start_ui.py
 - 向量库默认以 FAISS 为主，分布式或大规模场景能力有限
 - 多模态部分仍以 OCR 和图片描述增强为主，深层视觉理解仍有限
 - 图片检索效果仍明显依赖 OCR 与 caption 质量，弱图像样本下证据可能不足
-- 多模态评测与日志观测框架仍未完全补齐
+- `PaddleOCR` 双后端抽象已经接入，但本地若未安装 `paddleocr / paddlepaddle`，当前仍会回落到 `Tesseract`
+- 说明书页模式已经能拆步骤和配图，但步骤质量仍受 OCR 结果影响，尚未接入更强的版面分析
+- 多模态评测与 trace 日志已经落地，但评测样本规模、指标覆盖和自动化对比能力仍有限
 - 项目中存在较多实验数据和阶段性样例，工程清理度一般
 - 目录内包含大量 `__pycache__`、示例索引和模型文件，学习友好但仓库纯净度较弱
 
@@ -373,7 +449,7 @@ python .\scripts\start_ui.py
 - 增加更多 Agent 工具，如网页搜索、代码执行、数据库查询
 - 提升 Agent 规划能力，引入更稳定的推理与状态管理
 - 扩展检索评测、自动化 benchmark 和可视化分析
-- 优化图片识别链路，例如检测、裁剪、多区域 OCR、领域提示词
+- 优化图片识别链路，例如版面检测、标题区 / 步骤区 / 清单区分块 OCR、箭头局部定位、领域词典纠错
 - 继续完善多模态评测、检索观测和知识库级策略配置
 - 增加更细粒度的权限控制、日志记录和错误追踪
 - 对外提供更统一的 OpenAI-compatible 接口层

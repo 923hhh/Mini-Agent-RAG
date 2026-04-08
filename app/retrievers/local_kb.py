@@ -577,7 +577,12 @@ def heuristic_rerank_candidates(
         reranked.append(candidate)
 
     reranked.sort(key=lambda item: item.rerank_score, reverse=True)
-    return reranked[: max(settings.kb.HYBRID_RERANK_TOP_K, top_k, 1)]
+    cutoff = resolve_rerank_cutoff(settings, query_profile, top_k)
+    return ensure_modality_coverage(
+        reranked_candidates=reranked,
+        required_modalities=resolve_required_modalities_for_query(query_profile),
+        cutoff=cutoff,
+    )
 
 
 def diversify_candidates(

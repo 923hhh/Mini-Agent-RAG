@@ -55,8 +55,17 @@ class KBSettings(BaseModel):
     DOC_PARSE_WORKERS: int = Field(default=4, ge=1, le=16)
     SMALL_TO_BIG_EXPAND_CHUNKS: int = Field(default=1, ge=0, le=5)
     IMAGE_OCR_ENABLED: bool = True
+    IMAGE_OCR_BACKEND: str = "tesseract"
+    IMAGE_OCR_INSTRUCTION_PAGE_BACKEND: str = "paddle"
+    IMAGE_OCR_FAST_MODE: bool = True
     IMAGE_OCR_LANGUAGE: str = "chi_sim+eng"
+    IMAGE_OCR_MAX_SIDE: int = Field(default=1600, ge=0, le=10000)
+    IMAGE_OCR_EARLY_STOP_CHARS: int = Field(default=24, ge=0, le=5000)
     OCR_TESSERACT_CMD: str = ""
+    PADDLE_OCR_LANGUAGE: str = "ch"
+    PADDLE_OCR_USE_ANGLE_CLS: bool = True
+    PADDLE_OCR_DET_LIMIT_SIDE_LEN: int = Field(default=1600, ge=0, le=10000)
+    PADDLE_OCR_MIN_SCORE: float = Field(default=0.45, ge=0.0, le=1.0)
     OCR_MIN_CONFIDENCE: float = Field(default=60.0, ge=0.0, le=100.0)
     OCR_MIN_TEXT_LENGTH: int = Field(default=6, ge=0, le=200)
     OCR_MIN_MEANINGFUL_RATIO: float = Field(default=0.6, ge=0.0, le=1.0)
@@ -95,18 +104,23 @@ class ModelSettings(BaseModel):
     RERANK_DEVICE: str = "cpu"
     AGENT_MODEL: str = "qwen2.5:7b"
     IMAGE_VLM_ENABLED: bool = False
+    IMAGE_VLM_AUTO_CAPTION_ENABLED: bool = False
     IMAGE_VLM_PROVIDER: str = "openai_compatible"
-    IMAGE_VLM_API_STYLE: str = "auto"
+    IMAGE_VLM_API_STYLE: str = "chat_completions"
     IMAGE_VLM_BASE_URL: str = ""
     IMAGE_VLM_API_KEY: str = ""
     IMAGE_VLM_MODEL: str = "deepseek-ai/deepseek-vl2"
     IMAGE_VLM_TIMEOUT_SECONDS: int = Field(default=120, ge=1, le=600)
-    IMAGE_VLM_MAX_TOKENS: int = Field(default=256, ge=16, le=2048)
+    IMAGE_VLM_MAX_TOKENS: int = Field(default=768, ge=16, le=2048)
+    IMAGE_VLM_MAX_SIDE: int = Field(default=1600, ge=0, le=10000)
     IMAGE_VLM_PROMPT: str = ""
     IMAGE_VLM_USE_OCR_CONTEXT: bool = True
-    IMAGE_VLM_AUTO_TRIGGER_BY_OCR: bool = True
+    IMAGE_VLM_AUTO_TRIGGER_BY_OCR: bool = False
     IMAGE_VLM_SKIP_IF_OCR_CHARS_AT_LEAST: int = Field(default=20, ge=0, le=5000)
     IMAGE_VLM_ONLY_WHEN_OCR_EMPTY: bool = True
+    IMAGE_VLM_REGION_CAPTION_ENABLED: bool = True
+    IMAGE_VLM_REGION_MAX_REGIONS: int = Field(default=3, ge=0, le=6)
+    IMAGE_VLM_REGION_MIN_SIDE: int = Field(default=320, ge=0, le=4000)
     TEMPERATURE: float = 0.3
     MAX_TOKENS: int = 2048
     ENABLE_STREAMING: bool = True

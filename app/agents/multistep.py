@@ -18,6 +18,7 @@ from app.schemas.chat import (
     RetrievedReference,
     ToolCallRecord,
 )
+from app.services.reference_overview import build_reference_overview
 from app.services.settings import AppSettings
 from app.services.streaming_llm import stream_prompt_output
 from app.tools.registry import ToolExecutionResult, execute_tool, tool_names
@@ -112,6 +113,7 @@ def run_agent(
         tool_calls=state.tool_calls,
         steps=state.steps,
         references=state.references,
+        reference_overview=build_reference_overview(state.references),
         knowledge_base_name=request.knowledge_base_name,
         used_tools=bool(state.tool_calls),
         stream=request.stream,
@@ -141,6 +143,7 @@ def stream_agent_events(
         "tool_calls": [item.model_dump() for item in state.tool_calls],
         "steps": [item.model_dump() for item in state.steps],
         "references": [item.model_dump() for item in state.references],
+        "reference_overview": build_reference_overview(state.references).model_dump(),
         "knowledge_base_name": request.knowledge_base_name,
         "used_tools": bool(state.tool_calls),
         "stream": True,

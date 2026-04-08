@@ -230,8 +230,28 @@ def render_image_ingestion_panel() -> None:
                 value=SETTINGS.kb.IMAGE_OCR_ENABLED,
                 help="图片文件入库时，先尝试提取图片中的文字。",
             )
+            image_ocr_backend = st.selectbox(
+                "OCR 主后端",
+                options=["tesseract", "paddle", "auto"],
+                index=["tesseract", "paddle", "auto"].index(
+                    SETTINGS.kb.IMAGE_OCR_BACKEND
+                    if SETTINGS.kb.IMAGE_OCR_BACKEND in {"tesseract", "paddle", "auto"}
+                    else "tesseract"
+                ),
+                help="默认保留 Tesseract；说明书页可再切换到 PaddleOCR。",
+            )
+            image_ocr_instruction_backend = st.selectbox(
+                "说明书页补充后端",
+                options=["paddle", "tesseract", "auto"],
+                index=["paddle", "tesseract", "auto"].index(
+                    SETTINGS.kb.IMAGE_OCR_INSTRUCTION_PAGE_BACKEND
+                    if SETTINGS.kb.IMAGE_OCR_INSTRUCTION_PAGE_BACKEND in {"paddle", "tesseract", "auto"}
+                    else "paddle"
+                ),
+                help="当识别到说明书/手册页特征时，会尝试用该后端补跑 OCR。",
+            )
             image_ocr_language = st.text_input(
-                "OCR 语言包",
+                "Tesseract 语言包",
                 value=SETTINGS.kb.IMAGE_OCR_LANGUAGE,
                 help="常见组合如 `chi_sim+eng`。",
             )
@@ -260,6 +280,28 @@ def render_image_ingestion_panel() -> None:
                 max_value=1.0,
                 value=float(SETTINGS.kb.OCR_MIN_MEANINGFUL_RATIO),
                 help="用于过滤符号噪声和乱码，建议保持在 0.5 到 0.8 之间。",
+            )
+            paddle_ocr_language = st.text_input(
+                "PaddleOCR 语言",
+                value=SETTINGS.kb.PADDLE_OCR_LANGUAGE,
+                help="常用中文是 `ch`。",
+            )
+            paddle_ocr_use_angle_cls = st.checkbox(
+                "PaddleOCR 启用方向分类",
+                value=SETTINGS.kb.PADDLE_OCR_USE_ANGLE_CLS,
+            )
+            paddle_ocr_det_limit_side_len = st.number_input(
+                "PaddleOCR 检测长边上限",
+                min_value=0,
+                max_value=10000,
+                value=int(SETTINGS.kb.PADDLE_OCR_DET_LIMIT_SIDE_LEN),
+            )
+            paddle_ocr_min_score = st.number_input(
+                "PaddleOCR 最低识别分数",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(SETTINGS.kb.PADDLE_OCR_MIN_SCORE),
+                help="低于该分数的 PaddleOCR 文本块会被丢弃。",
             )
             preview_tesseract_path = (
                 SETTINGS.resolve_path(ocr_tesseract_cmd.strip())
@@ -365,8 +407,14 @@ def render_image_ingestion_panel() -> None:
                 "kb_settings.yaml",
                 {
                     "IMAGE_OCR_ENABLED": bool(image_ocr_enabled),
+                    "IMAGE_OCR_BACKEND": image_ocr_backend,
+                    "IMAGE_OCR_INSTRUCTION_PAGE_BACKEND": image_ocr_instruction_backend,
                     "IMAGE_OCR_LANGUAGE": image_ocr_language.strip(),
                     "OCR_TESSERACT_CMD": ocr_tesseract_cmd.strip(),
+                    "PADDLE_OCR_LANGUAGE": paddle_ocr_language.strip(),
+                    "PADDLE_OCR_USE_ANGLE_CLS": bool(paddle_ocr_use_angle_cls),
+                    "PADDLE_OCR_DET_LIMIT_SIDE_LEN": int(paddle_ocr_det_limit_side_len),
+                    "PADDLE_OCR_MIN_SCORE": float(paddle_ocr_min_score),
                     "OCR_MIN_CONFIDENCE": float(ocr_min_confidence),
                     "OCR_MIN_TEXT_LENGTH": int(ocr_min_text_length),
                     "OCR_MIN_MEANINGFUL_RATIO": float(ocr_min_meaningful_ratio),
@@ -520,6 +568,16 @@ def render_knowledge_base_tab(api_base_url: str) -> None:
         )
         overwrite_existing = st.checkbox("覆盖同名文件", value=False)
         auto_rebuild = st.checkbox("上传后自动重建", value=False)
+        upload_enable_image_vlm = st.checkbox(
+            "自动重建时启用图片 VLM（仅本次）",
+            value=False,
+            help="只对这次自动重建生效，并会关闭增量复用，适合指定知识库手动补图片 caption。",
+        )
+        upload_force_full_rebuild = st.checkbox(
+            "自动重建时强制全量重建",
+            value=False,
+            help="忽略增量缓存，确保本次重建重新处理全部文件。",
+        )
         upload_chunk_size = st.number_input("上传重建 chunk_size", min_value=1, value=SETTINGS.kb.CHUNK_SIZE)
         upload_chunk_overlap = st.number_input(
             "上传重建 chunk_overlap",
@@ -553,6 +611,8 @@ def render_knowledge_base_tab(api_base_url: str) -> None:
                         "knowledge_base_name": upload_knowledge_base_name,
                         "overwrite_existing": overwrite_existing,
                         "auto_rebuild": auto_rebuild,
+                        "enable_image_vlm_for_build": upload_enable_image_vlm,
+                        "force_full_rebuild": upload_force_full_rebuild,
                         "chunk_size": int(upload_chunk_size),
                         "chunk_overlap": int(upload_chunk_overlap),
                     },
@@ -583,6 +643,16 @@ def render_knowledge_base_tab(api_base_url: str) -> None:
         chunk_size = st.number_input("chunk_size", min_value=1, value=SETTINGS.kb.CHUNK_SIZE)
         chunk_overlap = st.number_input("chunk_overlap", min_value=0, value=SETTINGS.kb.CHUNK_OVERLAP)
         embedding_model = st.text_input("Embedding 模型覆盖", value="")
+        rebuild_enable_image_vlm = st.checkbox(
+            "本次重建启用图片 VLM（仅当前知识库）",
+            value=False,
+            help="只对这次重建生效，适合在默认关闭自动 caption 的前提下，单独为某个知识库补图片描述。",
+        )
+        rebuild_force_full = st.checkbox(
+            "本次强制全量重建",
+            value=False,
+            help="忽略增量缓存，确保图片和文档都按当前策略重新处理。",
+        )
         submit_rebuild = st.form_submit_button("执行重建", use_container_width=True)
 
     if submit_rebuild:
@@ -590,6 +660,8 @@ def render_knowledge_base_tab(api_base_url: str) -> None:
             "knowledge_base_name": knowledge_base_name,
             "chunk_size": int(chunk_size),
             "chunk_overlap": int(chunk_overlap),
+            "enable_image_vlm_for_build": rebuild_enable_image_vlm,
+            "force_full_rebuild": rebuild_force_full,
         }
         if embedding_model.strip():
             request_body["embedding_model"] = embedding_model.strip()
@@ -611,10 +683,14 @@ def render_knowledge_base_tab(api_base_url: str) -> None:
                 st.error(str(payload))
 
 
-def render_references(references: list[dict[str, Any]]) -> None:
+def render_references(
+    references: list[dict[str, Any]],
+    reference_overview: dict[str, Any] | None = None,
+) -> None:
     if not references:
         st.info("没有返回引用。")
         return
+    render_reference_summary(references, reference_overview=reference_overview)
     for index, ref in enumerate(references, start=1):
         title = f"[{index}] {ref.get('source', 'unknown')}"
         with st.expander(title, expanded=index == 1):
@@ -625,6 +701,95 @@ def render_references(references: list[dict[str, Any]]) -> None:
             st.write(f"source_modality: {ref.get('source_modality', '')}")
             st.write(f"source_path: {ref.get('source_path', '')}")
             st.write(ref.get("content_preview") or ref.get("content") or "")
+
+
+def render_reference_summary(
+    references: list[dict[str, Any]],
+    *,
+    reference_overview: dict[str, Any] | None = None,
+) -> None:
+    summary = normalize_reference_overview(reference_overview) or summarize_references(references)
+    text_count = summary["text_count"]
+    image_side_count = summary["image_side_count"]
+    multimodal_count = summary["multimodal_count"]
+    has_joint_coverage = summary["has_joint_text_image_coverage"]
+
+    st.markdown("#### 证据概览")
+    col_text, col_image, col_joint = st.columns(3)
+    with col_text:
+        st.metric("文本证据", int(text_count))
+    with col_image:
+        st.metric("图片侧证据", int(image_side_count))
+    with col_joint:
+        st.metric("联合覆盖", "是" if has_joint_coverage else "否")
+
+    if has_joint_coverage:
+        st.success("本次检索已同时命中文本证据和图片侧证据。")
+    elif image_side_count > 0:
+        st.info("当前引用包含图片侧证据，但未形成文本 + 图片的联合覆盖。")
+    else:
+        st.info("当前引用以文本证据为主，未包含图片侧证据。")
+
+    modality_summary = format_reference_distribution(summary["source_modality_counts"])
+    evidence_summary = format_reference_distribution(summary["evidence_type_counts"])
+    if modality_summary:
+        st.caption(f"source_modality 分布: {modality_summary}")
+    if evidence_summary:
+        st.caption(f"evidence_type 分布: {evidence_summary}")
+    if multimodal_count > 0:
+        st.caption(f"包含 {multimodal_count} 条 OCR + 视觉联合证据。")
+
+
+def summarize_references(references: list[dict[str, Any]]) -> dict[str, Any]:
+    source_modality_counts: dict[str, int] = {}
+    evidence_type_counts: dict[str, int] = {}
+    text_count = 0
+    image_side_count = 0
+    multimodal_count = 0
+
+    for ref in references:
+        source_modality = str(ref.get("source_modality", "") or "").strip() or "missing"
+        evidence_type = str(ref.get("evidence_type", "") or "").strip() or "missing"
+        source_modality_counts[source_modality] = source_modality_counts.get(source_modality, 0) + 1
+        evidence_type_counts[evidence_type] = evidence_type_counts.get(evidence_type, 0) + 1
+
+        if evidence_type == "text" or source_modality == "text":
+            text_count += 1
+        if evidence_type in {"ocr", "vision", "multimodal"} or source_modality in {"ocr", "vision", "ocr+vision", "image"}:
+            image_side_count += 1
+        if evidence_type == "multimodal" or source_modality == "ocr+vision":
+            multimodal_count += 1
+
+    return {
+        "text_count": text_count,
+        "image_side_count": image_side_count,
+        "multimodal_count": multimodal_count,
+        "has_joint_text_image_coverage": text_count > 0 and image_side_count > 0,
+        "source_modality_counts": source_modality_counts,
+        "evidence_type_counts": evidence_type_counts,
+    }
+
+
+def normalize_reference_overview(
+    overview: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(overview, dict):
+        return None
+    return {
+        "text_count": int(overview.get("text_count", 0) or 0),
+        "image_side_count": int(overview.get("image_side_count", 0) or 0),
+        "multimodal_count": int(overview.get("multimodal_count", 0) or 0),
+        "has_joint_text_image_coverage": bool(overview.get("has_joint_text_image_coverage", False)),
+        "source_modality_counts": dict(overview.get("source_modality_counts", {}) or {}),
+        "evidence_type_counts": dict(overview.get("evidence_type_counts", {}) or {}),
+    }
+
+
+def format_reference_distribution(counts: dict[str, int]) -> str:
+    if not counts:
+        return ""
+    parts = [f"{key}={value}" for key, value in sorted(counts.items(), key=lambda item: item[0])]
+    return " / ".join(parts)
 
 
 def render_tool_calls(tool_calls: list[dict[str, Any]]) -> None:
@@ -665,6 +830,7 @@ def render_streaming_response(
 
     answer_text = ""
     references: list[dict[str, Any]] = []
+    reference_overview: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
     status_placeholder.info("流式输出进行中...")
@@ -689,7 +855,7 @@ def render_streaming_response(
                     references.append(reference)
                     with references_placeholder.container():
                         st.markdown("### 引用")
-                        render_references(references)
+                        render_references(references, reference_overview=reference_overview)
                 continue
 
             if event_type == "tool_call":
@@ -723,11 +889,16 @@ def render_streaming_response(
                     answer_placeholder.markdown(answer_text)
 
                 final_references = event.get("references")
+                final_reference_overview = event.get("reference_overview")
+                if isinstance(final_reference_overview, dict):
+                    reference_overview = final_reference_overview
+
                 if not references and isinstance(final_references, list):
                     references = [item for item in final_references if isinstance(item, dict)]
+                if references:
                     with references_placeholder.container():
                         st.markdown("### 引用")
-                        render_references(references)
+                        render_references(references, reference_overview=reference_overview)
 
                 final_tool_calls = event.get("tool_calls")
                 if include_tools and isinstance(final_tool_calls, list):
@@ -874,7 +1045,10 @@ def render_rag_tab(api_base_url: str) -> None:
                 st.markdown("### 回答")
                 st.write(payload["answer"])
                 st.markdown("### 引用")
-                render_references(payload.get("references", []))
+                render_references(
+                    payload.get("references", []),
+                    reference_overview=payload.get("reference_overview"),
+                )
             else:
                 st.error(str(payload))
 
@@ -970,7 +1144,10 @@ def render_agent_tab(api_base_url: str) -> None:
                 st.markdown("### 中间步骤")
                 render_agent_steps(payload.get("steps", []))
                 st.markdown("### 引用")
-                render_references(payload.get("references", []))
+                render_references(
+                    payload.get("references", []),
+                    reference_overview=payload.get("reference_overview"),
+                )
             else:
                 st.error(str(payload))
 
