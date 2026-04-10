@@ -38,6 +38,10 @@ env/
 .env.local
 
 # Data files (runtime generated)
+data/knowledge_base/
+data/vector_store/
+data/eval/
+data/external/
 data/*.json
 data/*.txt
 data/*.csv
