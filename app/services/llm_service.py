@@ -75,7 +75,11 @@ def resolve_openai_compatible_base_url(settings: AppSettings) -> str:
     configured = settings.model.OPENAI_COMPATIBLE_BASE_URL.strip()
     if configured:
         return configured
-    return os.getenv("OPENAI_BASE_URL", "").strip()
+    for env_name in ("OPENAI_COMPATIBLE_BASE_URL", "OPENAI_BASE_URL"):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def resolve_openai_compatible_api_key(settings: AppSettings) -> str:
@@ -83,7 +87,12 @@ def resolve_openai_compatible_api_key(settings: AppSettings) -> str:
     if configured:
         return configured
 
-    for env_name in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY"):
+    for env_name in (
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "DEEPSEEK_API_KEY",
+    ):
         value = os.getenv(env_name, "").strip()
         if value:
             return value

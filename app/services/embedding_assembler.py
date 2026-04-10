@@ -13,6 +13,7 @@ from app.schemas.kb import DocumentChunkRecord
 from app.services.embedding_service import build_embeddings, embed_texts_batched
 from app.services.settings import AppSettings
 from app.storage.vector_stores import VectorStoreEntry, build_vector_store_adapter
+from app.utils.text import coerce_optional_text, extract_header_metadata
 
 
 @dataclass(frozen=True)
@@ -180,32 +181,16 @@ def attach_chunk_metadata(chunks: list[Document]) -> list[DocumentChunkRecord]:
                 section_title=chunk.metadata.get("section_title"),
                 section_path=chunk.metadata.get("section_path"),
                 section_index=int(section_index) if section_index is not None else None,
-                content_type=_coerce_optional_text(chunk.metadata.get("content_type")),
-                source_modality=_coerce_optional_text(chunk.metadata.get("source_modality")),
-                original_file_type=_coerce_optional_text(chunk.metadata.get("original_file_type")),
-                ocr_text=_coerce_optional_text(chunk.metadata.get("ocr_text")),
-                ocr_language=_coerce_optional_text(chunk.metadata.get("ocr_language")),
-                image_caption=_coerce_optional_text(chunk.metadata.get("image_caption")),
-                evidence_summary=_coerce_optional_text(chunk.metadata.get("evidence_summary")),
+                content_type=coerce_optional_text(chunk.metadata.get("content_type")),
+                source_modality=coerce_optional_text(chunk.metadata.get("source_modality")),
+                original_file_type=coerce_optional_text(chunk.metadata.get("original_file_type")),
+                ocr_text=coerce_optional_text(chunk.metadata.get("ocr_text")),
+                ocr_language=coerce_optional_text(chunk.metadata.get("ocr_language")),
+                image_caption=coerce_optional_text(chunk.metadata.get("image_caption")),
+                evidence_summary=coerce_optional_text(chunk.metadata.get("evidence_summary")),
                 headers=headers,
                 content_length=len(chunk.page_content),
                 content_preview=chunk.page_content[:120],
             )
         )
     return records
-
-
-def extract_header_metadata(metadata: dict[str, object]) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for key in ("Header1", "Header2", "Header3"):
-        value = metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            headers[key] = value.strip()
-    return headers
-
-
-def _coerce_optional_text(value: object) -> str | None:
-    if isinstance(value, str):
-        normalized = value.strip()
-        return normalized or None
-    return None

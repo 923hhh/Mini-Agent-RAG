@@ -9,6 +9,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
+from app.constants import IMAGE_QUERY_HINTS
 from app.schemas.chat import ChatMessage, RetrievedReference
 from app.services.embedding_service import build_embeddings
 from app.services.observability import append_jsonl_trace
@@ -24,27 +25,12 @@ from app.storage.filters import (
     matches_metadata_filters,
 )
 from app.storage.vector_stores import BaseVectorStoreAdapter, build_vector_store_adapter
+from app.utils.text import coerce_optional_text, deduplicate_strings, extract_document_headers
 
 
 ASCII_TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]*", re.IGNORECASE)
 CJK_SEQUENCE_PATTERN = re.compile(r"[\u4e00-\u9fff]+")
 NON_ALNUM_PATTERN = re.compile(r"[^0-9a-z\u4e00-\u9fff]+", re.IGNORECASE)
-IMAGE_QUERY_HINTS = (
-    "图片",
-    "图像",
-    "照片",
-    "截图",
-    "看图",
-    "图中",
-    "画面",
-    "ocr",
-    "文字识别",
-    "识别图",
-    "内容描述",
-    "视觉描述",
-    "画了什么",
-    "有什么内容",
-)
 TEXT_QUERY_HINTS = (
     "文档",
     "章节",
@@ -655,15 +641,15 @@ def candidate_to_reference(
         section_title=candidate.document.metadata.get("section_title"),
         section_path=candidate.document.metadata.get("section_path"),
         section_index=_coerce_page(candidate.document.metadata.get("section_index")),
-        content_type=_coerce_optional_text(candidate.document.metadata.get("content_type")),
-        source_modality=_coerce_optional_text(candidate.document.metadata.get("source_modality")),
+        content_type=coerce_optional_text(candidate.document.metadata.get("content_type")),
+        source_modality=coerce_optional_text(candidate.document.metadata.get("source_modality")),
         evidence_type=resolve_reference_evidence_type(candidate.document),
         used_for_answer=True,
-        original_file_type=_coerce_optional_text(candidate.document.metadata.get("original_file_type")),
-        ocr_text=_coerce_optional_text(candidate.document.metadata.get("ocr_text")),
-        image_caption=_coerce_optional_text(candidate.document.metadata.get("image_caption")),
-        evidence_summary=_coerce_optional_text(candidate.document.metadata.get("evidence_summary")),
-        headers=extract_headers(candidate.document),
+        original_file_type=coerce_optional_text(candidate.document.metadata.get("original_file_type")),
+        ocr_text=coerce_optional_text(candidate.document.metadata.get("ocr_text")),
+        image_caption=coerce_optional_text(candidate.document.metadata.get("image_caption")),
+        evidence_summary=coerce_optional_text(candidate.document.metadata.get("evidence_summary")),
+        headers=extract_document_headers(candidate.document),
         content=expanded_content,
         content_preview=expanded_content[:200],
         raw_score=raw_score,
@@ -929,7 +915,7 @@ def build_search_text(document: Document) -> str:
     section_title = str(document.metadata.get("section_title", "")).strip()
     section_path = str(document.metadata.get("section_path", "")).strip()
     source = str(document.metadata.get("source", "")).strip()
-    header_text = " ".join(extract_headers(document).values()).strip()
+    header_text = " ".join(extract_document_headers(document).values()).strip()
     content = document.page_content.strip()
     parts: list[str] = []
     for item in (title, section_title, section_path, header_text, source, content):
@@ -1149,25 +1135,6 @@ def _coerce_page(value: object) -> int | None:
         return None
 
 
-def _coerce_optional_text(value: object) -> str | None:
-    if isinstance(value, str):
-        normalized = value.strip()
-        return normalized or None
-    return None
-
-
-def deduplicate_strings(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        normalized = value.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(normalized)
-    return result
-
-
 def extract_path_hint_terms_from_queries(query_bundle: list[str]) -> tuple[str, ...]:
     hints: list[str] = []
     for query in query_bundle:
@@ -1180,12 +1147,3 @@ def extract_path_hint_terms_from_queries(query_bundle: list[str]) -> tuple[str, 
             if len(token) >= 2
         )
     return tuple(deduplicate_strings(hints)[:8])
-
-
-def extract_headers(document: Document) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for key in ("Header1", "Header2", "Header3"):
-        value = document.metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            headers[key] = value.strip()
-    return headers

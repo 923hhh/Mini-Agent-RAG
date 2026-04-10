@@ -18,6 +18,7 @@ from app.storage.vector_stores import (
     VectorStoreEntry,
     vector_store_index_exists,
 )
+from app.utils.text import coerce_optional_text
 
 
 class CachedChunkEntry(BaseModel):
@@ -532,13 +533,13 @@ def chunk_entry_to_record(entry: CachedChunkEntry) -> DocumentChunkRecord:
         section_title=entry.metadata.get("section_title"),
         section_path=entry.metadata.get("section_path"),
         section_index=section_index_value,
-        content_type=_coerce_optional_text(entry.metadata.get("content_type")),
-        source_modality=_coerce_optional_text(entry.metadata.get("source_modality")),
-        original_file_type=_coerce_optional_text(entry.metadata.get("original_file_type")),
-        ocr_text=_coerce_optional_text(entry.metadata.get("ocr_text")),
-        ocr_language=_coerce_optional_text(entry.metadata.get("ocr_language")),
-        image_caption=_coerce_optional_text(entry.metadata.get("image_caption")),
-        evidence_summary=_coerce_optional_text(entry.metadata.get("evidence_summary")),
+        content_type=coerce_optional_text(entry.metadata.get("content_type")),
+        source_modality=coerce_optional_text(entry.metadata.get("source_modality")),
+        original_file_type=coerce_optional_text(entry.metadata.get("original_file_type")),
+        ocr_text=coerce_optional_text(entry.metadata.get("ocr_text")),
+        ocr_language=coerce_optional_text(entry.metadata.get("ocr_language")),
+        image_caption=coerce_optional_text(entry.metadata.get("image_caption")),
+        evidence_summary=coerce_optional_text(entry.metadata.get("evidence_summary")),
         headers=extract_header_metadata(entry.metadata),
         content_length=len(entry.page_content),
         content_preview=entry.page_content[:120],
@@ -602,15 +603,6 @@ def compute_file_sha256(path: Path) -> str:
 
 def hash_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
-
-
-def _coerce_optional_text(value: Any) -> str | None:
-    if isinstance(value, str):
-        normalized = value.strip()
-        return normalized or None
-    return None
-
-
 def cached_entry_to_vector_entry(entry: CachedChunkEntry) -> VectorStoreEntry:
     return VectorStoreEntry(
         chunk_id=entry.chunk_id,

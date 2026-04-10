@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.agents.executor import run_agent, stream_agent_events, validate_agent_request
+from app.agents.multistep import run_agent, stream_agent_events, validate_agent_request
 from app.api.errors import error_payload
 from app.api.streaming import SSE_MEDIA_TYPE, sse_event
 from app.chains.rag import generate_rag_answer

@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from app.constants import IMAGE_QUERY_HINTS
 from app.schemas.chat import ChatMessage, RetrievedReference
 from app.services.llm_service import build_chat_model
 from app.services.observability import append_jsonl_trace
@@ -28,26 +29,6 @@ IMAGE_RAG_SYSTEM_PROMPT = """你是一个基于本地知识库的多模态问答
 3. 如果 OCR 证据和视觉描述证据冲突，必须明确指出冲突，不要强行合并。
 4. 如果图片证据不足，请明确说明“根据当前检索到的图片相关证据，无法确定”，不要拿普通正文内容替代图片结论。
 5. 回答尽量简洁，先说可确认内容，再说可能推断。"""
-
-IMAGE_QUERY_HINTS = (
-    "图",
-    "图片",
-    "图像",
-    "照片",
-    "截图",
-    "画面",
-    "看图",
-    "图里",
-    "图中",
-    "这张图",
-    "这幅图",
-    "ocr",
-    "识别",
-    "图片文字",
-    "图像描述",
-    "视觉描述",
-)
-
 
 def generate_rag_answer(
     settings: AppSettings,

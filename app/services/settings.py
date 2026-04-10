@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -188,6 +190,17 @@ class AppSettings(BaseModel):
     def temp_vector_store_dir(self, knowledge_id: str) -> Path:
         return self.temp_knowledge_dir(knowledge_id) / "vector_store"
 
+    def resolve_ocr_tesseract_cmd(self) -> str:
+        for env_key in ("OCR_TESSERACT_CMD", "TESSERACT_CMD"):
+            raw_value = os.getenv(env_key, "").strip()
+            if raw_value:
+                return str(self.resolve_path(raw_value))
+
+        configured = self.kb.OCR_TESSERACT_CMD.strip()
+        if not configured:
+            return ""
+        return str(self.resolve_path(configured))
+
 
 DEFAULT_CONFIG_MODELS: dict[str, type[BaseModel]] = {
     "basic_settings.yaml": BasicSettings,
@@ -261,10 +274,22 @@ def save_config_values(
     }
     final_data = {**validated_data, **preserved_unknown}
     write_yaml_file(config_path, final_data)
+    clear_settings_cache()
     return final_data
 
 
 def load_settings(project_root: Path) -> AppSettings:
+    normalized_project_root = str(project_root.resolve())
+    return _load_settings_cached(normalized_project_root)
+
+
+def clear_settings_cache() -> None:
+    _load_settings_cached.cache_clear()
+
+
+@lru_cache(maxsize=8)
+def _load_settings_cached(project_root_str: str) -> AppSettings:
+    project_root = Path(project_root_str)
     config_root = project_root / "configs"
 
     try:

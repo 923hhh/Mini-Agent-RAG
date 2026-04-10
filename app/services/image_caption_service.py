@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
 import re
 import warnings
 from dataclasses import dataclass
@@ -12,6 +13,11 @@ from typing import Any
 
 from app.services.network import build_httpx_client
 from app.services.settings import AppSettings
+from app.services.llm_service import (
+    resolve_openai_compatible_api_key,
+    resolve_openai_compatible_base_url,
+)
+from app.utils.text import deduplicate_strings
 
 
 DEFAULT_IMAGE_CAPTION_PROMPT = (
@@ -528,17 +534,7 @@ def normalize_text_list(value: object) -> tuple[str, ...]:
         items.extend(normalize_text_value(item) for item in candidates)
     elif isinstance(value, (list, tuple)):
         items.extend(normalize_text_value(item) for item in value)
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        if not item:
-            continue
-        if item in seen:
-            continue
-        seen.add(item)
-        deduped.append(item)
-    return tuple(deduped)
+    return tuple(deduplicate_strings(items))
 
 
 def build_fallback_structured_summary(
@@ -662,11 +658,23 @@ def resolve_image_vlm_base_url(settings: AppSettings) -> str:
     configured = settings.model.IMAGE_VLM_BASE_URL.strip()
     if configured:
         return configured
-    return settings.model.OPENAI_COMPATIBLE_BASE_URL.strip()
+
+    for env_name in ("IMAGE_VLM_BASE_URL", "ARK_BASE_URL", "VOLCENGINE_BASE_URL"):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value
+
+    return resolve_openai_compatible_base_url(settings)
 
 
 def resolve_image_vlm_api_key(settings: AppSettings) -> str:
     configured = settings.model.IMAGE_VLM_API_KEY.strip()
     if configured:
         return configured
-    return settings.model.OPENAI_COMPATIBLE_API_KEY.strip()
+
+    for env_name in ("IMAGE_VLM_API_KEY", "ARK_API_KEY", "VOLCENGINE_API_KEY"):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value
+
+    return resolve_openai_compatible_api_key(settings)

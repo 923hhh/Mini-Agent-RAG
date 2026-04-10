@@ -1,19 +1,60 @@
 from __future__ import annotations
 
-from langchain_ollama import OllamaEmbeddings
+from typing import Any
 
 from app.services.settings import AppSettings
+from app.services.llm_service import (
+    normalize_llm_provider,
+    resolve_openai_compatible_api_key,
+    resolve_openai_compatible_base_url,
+)
 
 
-def build_embeddings(settings: AppSettings, model_name: str | None = None) -> OllamaEmbeddings:
-    return OllamaEmbeddings(
-        model=model_name or settings.model.DEFAULT_EMBEDDING_MODEL,
-        base_url=settings.model.OLLAMA_BASE_URL,
-    )
+def build_embeddings(settings: AppSettings, model_name: str | None = None) -> Any:
+    provider = normalize_llm_provider(settings.model.LLM_PROVIDER)
+    resolved_model_name = model_name or settings.model.DEFAULT_EMBEDDING_MODEL
+
+    if provider == "ollama":
+        from langchain_ollama import OllamaEmbeddings
+
+        return OllamaEmbeddings(
+            model=resolved_model_name,
+            base_url=settings.model.OLLAMA_BASE_URL,
+        )
+
+    if provider == "openai_compatible":
+        try:
+            from langchain_openai import OpenAIEmbeddings
+        except ImportError as exc:
+            raise RuntimeError(
+                "当前 LLM_PROVIDER=openai_compatible，但未安装 `langchain-openai`。"
+                "请先执行 `pip install -r requirements.txt`。"
+            ) from exc
+
+        base_url = resolve_openai_compatible_base_url(settings)
+        api_key = resolve_openai_compatible_api_key(settings)
+        if not base_url:
+            raise ValueError(
+                "当前 LLM_PROVIDER=openai_compatible，但未配置 OPENAI_COMPATIBLE_BASE_URL。"
+            )
+        if not api_key:
+            raise ValueError(
+                "当前 LLM_PROVIDER=openai_compatible，但未配置 OPENAI_COMPATIBLE_API_KEY。"
+            )
+
+        return OpenAIEmbeddings(
+            model=resolved_model_name,
+            base_url=base_url,
+            api_key=api_key,
+            request_timeout=settings.model.OPENAI_COMPATIBLE_TIMEOUT_SECONDS,
+            max_retries=settings.model.OPENAI_COMPATIBLE_MAX_RETRIES,
+        )
+
+    raise ValueError(f"不支持的 Embedding provider: {settings.model.LLM_PROVIDER}")
 
 
 def embed_texts_batched(
-    embeddings: OllamaEmbeddings,
+    embeddings: Any,
     texts: list[str],
     batch_size: int,
 ) -> list[list[float]]:
