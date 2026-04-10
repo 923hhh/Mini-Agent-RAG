@@ -42,6 +42,10 @@ data/knowledge_base/
 data/vector_store/
 data/eval/
 data/external/
+data/models/
+data/huggingface/
+data/tools/
+data/tmp/
 data/*.json
 data/*.txt
 data/*.csv
