@@ -3,12 +3,14 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import requests
 import streamlit as st
 
 import app.services.settings as settings_module
+from app.services.image_caption_service import resolve_image_vlm_api_key
 
 
 settings_module = importlib.reload(settings_module)
@@ -209,6 +211,31 @@ def refresh_knowledge_bases(api_base_url: str) -> tuple[bool, Any]:
     return ok, payload
 
 
+def wait_for_rebuild_task(
+    api_base_url: str,
+    task_id: str,
+    *,
+    timeout: int = 1800,
+    interval_seconds: float = 1.5,
+) -> tuple[bool, Any]:
+    deadline = time.time() + timeout
+    last_payload: Any = None
+    while time.time() < deadline:
+        ok, payload = api_request(
+            "GET",
+            api_base_url,
+            f"/knowledge_base/rebuild/{task_id}",
+            timeout=60,
+        )
+        if not ok:
+            return False, payload
+        last_payload = payload
+        if isinstance(payload, dict) and payload.get("status") in {"succeeded", "failed"}:
+            return True, payload
+        time.sleep(interval_seconds)
+    return True, last_payload
+
+
 def render_image_ingestion_panel() -> None:
     image_extensions = [
         ext
@@ -352,11 +379,18 @@ def render_image_ingestion_panel() -> None:
                 value=SETTINGS.model.IMAGE_VLM_BASE_URL,
                 help="例如火山引擎兼容端点 `https://ark.cn-beijing.volces.com/api/v3`。",
             )
-            image_vlm_api_key = st.text_input(
+            has_runtime_image_vlm_api_key = bool(resolve_image_vlm_api_key(SETTINGS).strip())
+            st.text_input(
                 "VLM API Key",
-                value=SETTINGS.model.IMAGE_VLM_API_KEY,
+                value="",
                 type="password",
+                disabled=True,
+                placeholder="通过环境变量 IMAGE_VLM_API_KEY / ARK_API_KEY / VOLCENGINE_API_KEY 提供",
             )
+            if has_runtime_image_vlm_api_key:
+                st.success("已检测到运行时 VLM API Key。密钥不会写入 `model_settings.yaml`。")
+            else:
+                st.warning("未检测到运行时 VLM API Key。启用图片视觉描述时请先设置环境变量。")
             image_vlm_model = st.text_input(
                 "VLM Model",
                 value=SETTINGS.model.IMAGE_VLM_MODEL,
@@ -434,7 +468,6 @@ def render_image_ingestion_panel() -> None:
                     "IMAGE_VLM_PROVIDER": image_vlm_provider,
                     "IMAGE_VLM_API_STYLE": image_vlm_api_style,
                     "IMAGE_VLM_BASE_URL": image_vlm_base_url.strip(),
-                    "IMAGE_VLM_API_KEY": image_vlm_api_key.strip(),
                     "IMAGE_VLM_MODEL": image_vlm_model.strip(),
                     "IMAGE_VLM_USE_OCR_CONTEXT": bool(image_vlm_use_ocr_context),
                     "IMAGE_VLM_AUTO_TRIGGER_BY_OCR": bool(image_vlm_auto_trigger_by_ocr),
@@ -450,6 +483,7 @@ def render_image_ingestion_panel() -> None:
         else:
             st.session_state["image_ingestion_config_notice"] = (
                 "图片 OCR / VLM 配置已保存到 `kb_settings.yaml` 和 `model_settings.yaml`。"
+                "API Key 仍需通过环境变量提供，且保存后需要重启 API / UI 才会生效。"
             )
             st.rerun()
 
@@ -469,7 +503,7 @@ def render_image_ingestion_panel() -> None:
             - `IMAGE_VLM_API_STYLE`
               控制视觉接口调用风格。火山方舟视觉接入点建议用 `responses`。
             - `IMAGE_VLM_BASE_URL / IMAGE_VLM_API_KEY / IMAGE_VLM_MODEL`
-              配置视觉模型的 OpenAI-compatible 接口。
+              配置视觉模型的 OpenAI-compatible 接口；其中 `IMAGE_VLM_API_KEY` 只从环境变量读取，不写入 YAML。
             - `IMAGE_VLM_USE_OCR_CONTEXT`
               启用后，会把 OCR 文本一起发给视觉模型，让模型结合文字和图像做判断。
             - `IMAGE_VLM_AUTO_TRIGGER_BY_OCR`
@@ -494,7 +528,6 @@ IMAGE_VLM_ENABLED: true
 IMAGE_VLM_PROVIDER: openai_compatible
 IMAGE_VLM_API_STYLE: responses
 IMAGE_VLM_BASE_URL: https://ark.cn-beijing.volces.com/api/v3
-IMAGE_VLM_API_KEY: <YOUR_API_KEY>
 IMAGE_VLM_MODEL: ep-20260406190608-m7w79
 IMAGE_VLM_USE_OCR_CONTEXT: true
 IMAGE_VLM_AUTO_TRIGGER_BY_OCR: true
@@ -504,10 +537,13 @@ IMAGE_VLM_PROMPT: |
   {ocr_text}
 
   请结合这些文字，分析图片中的设备状态和是否存在故障
-IMAGE_VLM_ONLY_WHEN_OCR_EMPTY: true""",
+IMAGE_VLM_ONLY_WHEN_OCR_EMPTY: true
+
+# 环境变量（不要写入 model_settings.yaml）
+# IMAGE_VLM_API_KEY=<YOUR_API_KEY>""",
             language="yaml",
         )
-        st.caption("这块现在支持在页面内直接保存。保存后 UI 会刷新；API 在下一次请求时会重新读取配置。")
+        st.caption("这块现在支持在页面内直接保存。保存后 UI 会刷新；API 需要重启后才会重新加载配置。")
 
 
 def render_knowledge_base_tab(api_base_url: str) -> None:
@@ -677,14 +713,39 @@ def render_knowledge_base_tab(api_base_url: str) -> None:
                 api_base_url,
                 "/knowledge_base/rebuild",
                 json_body=request_body,
-                timeout=180,
+                timeout=60,
             )
         except requests.RequestException as exc:
             st.error(f"知识库重建失败: {exc}")
         else:
             if ok:
-                st.success("知识库重建完成。")
-                st.json(payload)
+                task_id = payload.get("task_id") if isinstance(payload, dict) else ""
+                st.info(f"知识库重建任务已提交: {task_id}")
+                with st.spinner("重建任务执行中..."):
+                    wait_ok, task_payload = wait_for_rebuild_task(
+                        api_base_url,
+                        task_id,
+                        timeout=1800,
+                    )
+                if not wait_ok:
+                    st.error(str(task_payload))
+                elif not isinstance(task_payload, dict):
+                    st.warning("重建任务已提交，但未拿到可解析状态。")
+                elif task_payload.get("status") == "succeeded":
+                    st.success("知识库重建完成。")
+                    st.json(task_payload)
+                    try:
+                        refresh_knowledge_bases(api_base_url)
+                    except requests.RequestException:
+                        pass
+                elif task_payload.get("status") == "failed":
+                    st.error(
+                        f"知识库重建失败: {task_payload.get('error_message') or 'unknown error'}"
+                    )
+                    st.json(task_payload)
+                else:
+                    st.warning("知识库重建任务仍在执行，请稍后手动查询任务状态。")
+                    st.json(task_payload)
             else:
                 st.error(str(payload))
 

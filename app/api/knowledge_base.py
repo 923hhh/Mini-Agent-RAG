@@ -1,31 +1,30 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
+from app.api.dependencies import SettingsDep
 from app.api.errors import error_payload
 from app.schemas.kb import (
     KnowledgeBaseUploadResponse,
     KnowledgeBaseSummary,
     RebuildKnowledgeBaseRequest,
-    RebuildKnowledgeBaseResult,
+    RebuildTaskAccepted,
+    RebuildTaskStatus,
 )
 from app.services.kb_ingestion_service import (
     list_knowledge_bases,
-    rebuild_knowledge_base,
     upload_local_files,
     upload_temp_files,
 )
-from app.services.settings import load_settings
+from app.services.rebuild_task_service import get_rebuild_task, submit_rebuild_task
 
 
 router = APIRouter(prefix="/knowledge_base", tags=["knowledge_base"])
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @router.post("/upload", response_model=KnowledgeBaseUploadResponse)
 def upload_knowledge_base_files(
+    settings: SettingsDep,
     files: list[UploadFile] = File(...),
     scope: str = Form(...),
     knowledge_base_name: str = Form(""),
@@ -53,7 +52,6 @@ def upload_knowledge_base_files(
             ),
         )
 
-    settings = load_settings(PROJECT_ROOT)
     try:
         if scope == "temp":
             return upload_temp_files(
@@ -88,36 +86,38 @@ def upload_knowledge_base_files(
         ) from exc
 
 
-@router.post("/rebuild", response_model=RebuildKnowledgeBaseResult)
+@router.post("/rebuild", response_model=RebuildTaskAccepted, status_code=202)
 def rebuild_local_knowledge_base(
     request: RebuildKnowledgeBaseRequest,
-) -> RebuildKnowledgeBaseResult:
-    settings = load_settings(PROJECT_ROOT)
+    settings: SettingsDep,
+) -> RebuildTaskAccepted:
     try:
-        return rebuild_knowledge_base(
+        return submit_rebuild_task(
             settings=settings,
-            knowledge_base_name=request.knowledge_base_name,
-            chunk_size=request.chunk_size,
-            chunk_overlap=request.chunk_overlap,
-            embedding_model=request.embedding_model,
-            enable_image_vlm_for_build=request.enable_image_vlm_for_build,
-            force_full_rebuild=request.force_full_rebuild,
+            request=request,
         )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=error_payload(code="rebuild_validation_error", message=str(exc)),
-        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=error_payload(code="rebuild_failed", message=f"知识库重建失败: {exc}"),
+            detail=error_payload(code="rebuild_task_submit_failed", message=f"知识库重建任务提交失败: {exc}"),
         ) from exc
 
 
+@router.get("/rebuild/{task_id}", response_model=RebuildTaskStatus)
+def get_rebuild_task_status(task_id: str) -> RebuildTaskStatus:
+    task = get_rebuild_task(task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail=error_payload(code="rebuild_task_not_found", message=f"未找到重建任务: {task_id}"),
+        )
+    return task
+
+
 @router.get("/list", response_model=list[KnowledgeBaseSummary])
-def get_knowledge_base_list() -> list[KnowledgeBaseSummary]:
-    settings = load_settings(PROJECT_ROOT)
+def get_knowledge_base_list(
+    settings: SettingsDep,
+) -> list[KnowledgeBaseSummary]:
     try:
         return list_knowledge_bases(settings)
     except Exception as exc:

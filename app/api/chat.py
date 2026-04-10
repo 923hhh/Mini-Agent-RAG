@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.agents.multistep import run_agent, stream_agent_events, validate_agent_request
+from app.api.dependencies import SettingsDep
 from app.api.errors import error_payload
 from app.api.streaming import SSE_MEDIA_TYPE, sse_event
 from app.chains.rag import generate_rag_answer
@@ -13,12 +12,10 @@ from app.chains.rag import stream_rag_answer
 from app.retrievers.local_kb import search_local_knowledge_base, search_temp_knowledge_base
 from app.schemas.chat import AgentChatRequest, AgentChatResponse, ChatRequest, ChatResponse
 from app.services.reference_overview import build_reference_overview
-from app.services.settings import load_settings
 from app.services.temp_kb_service import TempKnowledgeBaseExpiredError
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def resolve_rag_request(
@@ -150,8 +147,10 @@ def agent_stream_response(
 
 
 @router.post("/rag", response_model=ChatResponse)
-def rag_chat(request: ChatRequest):
-    settings = load_settings(PROJECT_ROOT)
+def rag_chat(
+    request: ChatRequest,
+    settings: SettingsDep,
+):
     references, target_name = resolve_rag_request(settings, request)
 
     if request.stream:
@@ -182,8 +181,10 @@ def rag_chat(request: ChatRequest):
 
 
 @router.post("/agent", response_model=AgentChatResponse)
-def agent_chat(request: AgentChatRequest):
-    settings = load_settings(PROJECT_ROOT)
+def agent_chat(
+    request: AgentChatRequest,
+    settings: SettingsDep,
+):
     if request.stream:
         try:
             validate_agent_request(request)

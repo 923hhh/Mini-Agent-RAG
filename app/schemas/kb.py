@@ -72,6 +72,30 @@ class RebuildKnowledgeBaseRequest(BaseModel):
     force_full_rebuild: bool = False
 
 
+class RebuildTaskAccepted(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    task_id: str
+    knowledge_base_name: str
+    status: str
+    progress: float = 0.0
+    created_at: datetime
+
+
+class RebuildTaskStatus(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    task_id: str
+    knowledge_base_name: str
+    status: str
+    progress: float = 0.0
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_message: str | None = None
+    result: RebuildKnowledgeBaseResult | None = None
+
+
 class KnowledgeBaseSummary(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

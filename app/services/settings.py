@@ -208,6 +208,13 @@ DEFAULT_CONFIG_MODELS: dict[str, type[BaseModel]] = {
     "model_settings.yaml": ModelSettings,
 }
 
+SENSITIVE_CONFIG_FIELDS: dict[str, set[str]] = {
+    "model_settings.yaml": {
+        "OPENAI_COMPATIBLE_API_KEY",
+        "IMAGE_VLM_API_KEY",
+    }
+}
+
 
 def default_config_data() -> dict[str, dict[str, Any]]:
     return {
@@ -240,6 +247,48 @@ def sanitize_config_data(
     return sanitized, unknown
 
 
+def sanitize_sensitive_config_values(
+    filename: str,
+    data: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    sensitive_fields = SENSITIVE_CONFIG_FIELDS.get(filename, set())
+    if not sensitive_fields:
+        return data, []
+
+    sanitized = dict(data)
+    ignored: list[str] = []
+    for key in sorted(sensitive_fields):
+        value = sanitized.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        sanitized[key] = ""
+        ignored.append(key)
+    return sanitized, ignored
+
+
+def validate_sensitive_config_updates(
+    filename: str,
+    updates: dict[str, Any],
+) -> None:
+    sensitive_fields = SENSITIVE_CONFIG_FIELDS.get(filename, set())
+    forbidden = sorted(
+        key
+        for key in updates
+        if key in sensitive_fields
+        and (
+            not isinstance(updates.get(key), str)
+            or bool(str(updates.get(key)).strip())
+        )
+    )
+    if not forbidden:
+        return
+    raise ValueError(
+        f"{filename} 中的敏感配置项只支持通过环境变量提供: {', '.join(forbidden)}"
+    )
+
+
 def save_config_values(
     project_root: Path,
     filename: str,
@@ -255,6 +304,7 @@ def save_config_values(
         raise ValueError(
             f"{filename} 包含未识别的配置项: {', '.join(unknown_update_keys)}"
         )
+    validate_sensitive_config_updates(filename, updates)
 
     config_path = project_root / "configs" / filename
     current_data = read_yaml_file(config_path) if config_path.exists() else {}
@@ -263,6 +313,7 @@ def save_config_values(
 
     merged_data = dict(current_data)
     merged_data.update(updates)
+    merged_data, _ = sanitize_sensitive_config_values(filename, merged_data)
 
     sanitized, _ = sanitize_config_data(model, merged_data)
     validated = model.model_validate(sanitized)
@@ -293,17 +344,24 @@ def _load_settings_cached(project_root_str: str) -> AppSettings:
     config_root = project_root / "configs"
 
     try:
+        basic_raw = read_yaml_file(config_root / "basic_settings.yaml")
+        kb_raw = read_yaml_file(config_root / "kb_settings.yaml")
+        model_raw = read_yaml_file(config_root / "model_settings.yaml")
+        model_raw, model_sensitive = sanitize_sensitive_config_values(
+            "model_settings.yaml",
+            model_raw,
+        )
         basic_data, basic_unknown = sanitize_config_data(
             BasicSettings,
-            read_yaml_file(config_root / "basic_settings.yaml"),
+            basic_raw,
         )
         kb_data, kb_unknown = sanitize_config_data(
             KBSettings,
-            read_yaml_file(config_root / "kb_settings.yaml"),
+            kb_raw,
         )
         model_data, model_unknown = sanitize_config_data(
             ModelSettings,
-            read_yaml_file(config_root / "model_settings.yaml"),
+            model_raw,
         )
         basic = BasicSettings.model_validate(basic_data)
         kb = KBSettings.model_validate(kb_data)
@@ -321,6 +379,11 @@ def _load_settings_cached(project_root_str: str) -> AppSettings:
     for filename, unknown in ignored_fields.items():
         if unknown:
             print(f"[settings] 忽略未识别配置项 {filename}: {', '.join(unknown)}")
+    if model_sensitive:
+        print(
+            "[settings] 忽略 model_settings.yaml 中的敏感配置项: "
+            f"{', '.join(model_sensitive)}；请改用环境变量提供。"
+        )
 
     return AppSettings(
         project_root=project_root,

@@ -39,13 +39,46 @@ def main() -> int:
     }
 
     settings = load_settings(PROJECT_ROOT)
-    client = TestClient(app)
-
-    summary["api_checks"] = run_api_checks(settings, client)
+    with TestClient(app) as client:
+        summary["api_checks"] = run_api_checks(settings, client)
     summary["ui_checks"] = run_ui_checks()
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
+
+
+def submit_rebuild_and_wait(
+    client: TestClient,
+    payload: dict[str, object],
+    *,
+    timeout_seconds: float = 120.0,
+    poll_interval_seconds: float = 0.1,
+) -> tuple[int, dict[str, object]]:
+    response = client.post("/knowledge_base/rebuild", json=payload)
+    assert response.status_code == 202, "knowledge_base/rebuild task submit failed"
+    accepted_payload = response.json()
+    task_id = str(accepted_payload.get("task_id", "")).strip()
+    assert task_id, "knowledge_base/rebuild did not return task_id"
+
+    deadline = time.time() + timeout_seconds
+    last_payload: dict[str, object] = accepted_payload
+    while time.time() < deadline:
+        status_response = client.get(f"/knowledge_base/rebuild/{task_id}")
+        assert status_response.status_code == 200, "knowledge_base/rebuild status query failed"
+        task_payload = status_response.json()
+        last_payload = task_payload
+        status = str(task_payload.get("status", ""))
+        if status == "succeeded":
+            result = task_payload.get("result")
+            assert isinstance(result, dict), "rebuild task succeeded without result"
+            return status_response.status_code, result
+        if status == "failed":
+            raise AssertionError(
+                f"knowledge_base/rebuild failed: {task_payload.get('error_message', 'unknown error')}"
+            )
+        time.sleep(poll_interval_seconds)
+
+    raise AssertionError(f"knowledge_base/rebuild timed out: {last_payload}")
 
 
 def run_api_checks(settings, client: TestClient) -> dict[str, object]:
@@ -86,17 +119,16 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     assert checks["llm_provider_switching"]["api_provider_alias"] == "openai_compatible", "api provider alias mismatch"
     assert checks["llm_provider_switching"]["api_key_resolved"] == "demo-key", "api provider key resolve failed"
 
-    rebuild_response = client.post(
-        "/knowledge_base/rebuild",
-        json={"knowledge_base_name": "phase2_demo"},
+    rebuild_status_code, rebuild_json = submit_rebuild_and_wait(
+        client,
+        {"knowledge_base_name": "phase2_demo"},
     )
-    rebuild_json = rebuild_response.json()
     checks["rebuild_phase2_demo"] = {
-        "status_code": rebuild_response.status_code,
+        "status_code": rebuild_status_code,
         "chunks": rebuild_json.get("chunks"),
         "files_processed": rebuild_json.get("files_processed"),
     }
-    assert rebuild_response.status_code == 200, "knowledge_base/rebuild failed"
+    assert rebuild_status_code == 200, "knowledge_base/rebuild failed"
 
     write_local_knowledge_base_files(
         settings,
@@ -106,37 +138,35 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
             "faq.txt": "如果文件没有变化，重建时应该优先复用已有切片和向量缓存。",
         },
     )
-    incremental_full_response = client.post(
-        "/knowledge_base/rebuild",
-        json={"knowledge_base_name": incremental_kb_name},
+    incremental_full_status_code, incremental_full_json = submit_rebuild_and_wait(
+        client,
+        {"knowledge_base_name": incremental_kb_name},
     )
-    incremental_full_json = incremental_full_response.json()
     checks["incremental_rebuild_full"] = {
-        "status_code": incremental_full_response.status_code,
+        "status_code": incremental_full_status_code,
         "index_mode": incremental_full_json.get("index_mode"),
         "files_rebuilt": incremental_full_json.get("files_rebuilt"),
         "chunks_embedded": incremental_full_json.get("chunks_embedded"),
         "build_manifest_path": incremental_full_json.get("build_manifest_path"),
     }
-    assert incremental_full_response.status_code == 200, "incremental full rebuild failed"
+    assert incremental_full_status_code == 200, "incremental full rebuild failed"
     assert incremental_full_json.get("index_mode") == "full", "initial incremental rebuild should be full"
     assert incremental_full_json.get("files_rebuilt") == 2, "initial incremental rebuild file count mismatch"
     assert incremental_full_json.get("chunks_embedded", 0) >= 2, "initial incremental rebuild did not embed chunks"
 
-    incremental_reuse_response = client.post(
-        "/knowledge_base/rebuild",
-        json={"knowledge_base_name": incremental_kb_name},
+    incremental_reuse_status_code, incremental_reuse_json = submit_rebuild_and_wait(
+        client,
+        {"knowledge_base_name": incremental_kb_name},
     )
-    incremental_reuse_json = incremental_reuse_response.json()
     checks["incremental_rebuild_reuse"] = {
-        "status_code": incremental_reuse_response.status_code,
+        "status_code": incremental_reuse_status_code,
         "index_mode": incremental_reuse_json.get("index_mode"),
         "files_reused": incremental_reuse_json.get("files_reused"),
         "files_rebuilt": incremental_reuse_json.get("files_rebuilt"),
         "chunks_reused": incremental_reuse_json.get("chunks_reused"),
         "chunks_embedded": incremental_reuse_json.get("chunks_embedded"),
     }
-    assert incremental_reuse_response.status_code == 200, "incremental reuse rebuild failed"
+    assert incremental_reuse_status_code == 200, "incremental reuse rebuild failed"
     assert incremental_reuse_json.get("index_mode") == "reuse", "incremental rebuild did not enter reuse mode"
     assert incremental_reuse_json.get("files_rebuilt") == 0, "reuse rebuild unexpectedly rebuilt files"
     assert incremental_reuse_json.get("chunks_embedded") == 0, "reuse rebuild unexpectedly embedded chunks"
@@ -148,20 +178,19 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
             "append.txt": "新增文件时，索引应优先采用追加方式，而不是每次推翻整个向量库。",
         },
     )
-    incremental_append_response = client.post(
-        "/knowledge_base/rebuild",
-        json={"knowledge_base_name": incremental_kb_name},
+    incremental_append_status_code, incremental_append_json = submit_rebuild_and_wait(
+        client,
+        {"knowledge_base_name": incremental_kb_name},
     )
-    incremental_append_json = incremental_append_response.json()
     checks["incremental_rebuild_append"] = {
-        "status_code": incremental_append_response.status_code,
+        "status_code": incremental_append_status_code,
         "index_mode": incremental_append_json.get("index_mode"),
         "files_reused": incremental_append_json.get("files_reused"),
         "files_rebuilt": incremental_append_json.get("files_rebuilt"),
         "chunks_reused": incremental_append_json.get("chunks_reused"),
         "chunks_embedded": incremental_append_json.get("chunks_embedded"),
     }
-    assert incremental_append_response.status_code == 200, "incremental append rebuild failed"
+    assert incremental_append_status_code == 200, "incremental append rebuild failed"
     assert incremental_append_json.get("index_mode") == "append", "incremental rebuild did not enter append mode"
     assert incremental_append_json.get("files_reused", 0) >= 2, "append rebuild did not reuse existing files"
     assert incremental_append_json.get("files_rebuilt") == 1, "append rebuild should rebuild exactly one file"
@@ -190,20 +219,19 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
             "faq.txt": "如果文件内容发生变化，重建流程应安全回退，但其他未变化文件仍应复用缓存。",
         },
     )
-    incremental_modified_response = client.post(
-        "/knowledge_base/rebuild",
-        json={"knowledge_base_name": incremental_kb_name},
+    incremental_modified_status_code, incremental_modified_json = submit_rebuild_and_wait(
+        client,
+        {"knowledge_base_name": incremental_kb_name},
     )
-    incremental_modified_json = incremental_modified_response.json()
     checks["incremental_rebuild_modified_full"] = {
-        "status_code": incremental_modified_response.status_code,
+        "status_code": incremental_modified_status_code,
         "index_mode": incremental_modified_json.get("index_mode"),
         "files_reused": incremental_modified_json.get("files_reused"),
         "files_rebuilt": incremental_modified_json.get("files_rebuilt"),
         "chunks_reused": incremental_modified_json.get("chunks_reused"),
         "chunks_embedded": incremental_modified_json.get("chunks_embedded"),
     }
-    assert incremental_modified_response.status_code == 200, "incremental modified rebuild failed"
+    assert incremental_modified_status_code == 200, "incremental modified rebuild failed"
     assert incremental_modified_json.get("index_mode") == "full", "modified file should trigger full rebuild"
     assert incremental_modified_json.get("files_reused", 0) >= 2, "modified rebuild should still reuse unchanged files"
     assert incremental_modified_json.get("files_rebuilt") == 1, "modified rebuild should rebuild one changed file"
