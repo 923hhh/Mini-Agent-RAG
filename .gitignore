@@ -37,6 +37,9 @@ env/
 .env
 .env.local
 
+# Sensitive config (contains API keys)
+configs/model_settings.yaml
+
 # Data files (runtime generated)
 data/knowledge_base/
 data/vector_store/
