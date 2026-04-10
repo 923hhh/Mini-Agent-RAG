@@ -258,7 +258,7 @@ def render_image_ingestion_panel() -> None:
             ocr_tesseract_cmd = st.text_input(
                 "Tesseract 路径",
                 value=SETTINGS.kb.OCR_TESSERACT_CMD,
-                help="可填写绝对路径或相对项目根目录的路径。",
+                help="可填写绝对路径或相对项目根目录的路径；也可改用环境变量 OCR_TESSERACT_CMD / TESSERACT_CMD 覆盖。",
             )
             ocr_min_confidence = st.number_input(
                 "OCR 最低置信度",
@@ -306,7 +306,7 @@ def render_image_ingestion_panel() -> None:
             preview_tesseract_path = (
                 SETTINGS.resolve_path(ocr_tesseract_cmd.strip())
                 if ocr_tesseract_cmd.strip()
-                else None
+                else (Path(SETTINGS.resolve_ocr_tesseract_cmd()) if SETTINGS.resolve_ocr_tesseract_cmd() else None)
             )
             preview_tesseract_exists = bool(
                 preview_tesseract_path and preview_tesseract_path.exists()
@@ -317,6 +317,12 @@ def render_image_ingestion_panel() -> None:
                     st.success("已检测到本地 Tesseract 可执行文件。")
                 else:
                     st.warning("当前填写的 Tesseract 路径不存在，保存后 OCR 会失败。")
+            elif preview_tesseract_path is not None:
+                st.caption(f"当前生效路径: `{preview_tesseract_path}`")
+                if preview_tesseract_exists:
+                    st.success("已检测到本地 Tesseract 可执行文件。")
+                else:
+                    st.warning("当前默认/环境变量指定的 Tesseract 路径不存在。")
             else:
                 st.info("未配置 Tesseract 路径时，启用 OCR 也无法真正识别图片文字。")
 
@@ -455,7 +461,7 @@ def render_image_ingestion_panel() -> None:
             - `IMAGE_OCR_ENABLED`
               控制是否启用图片文字识别。
             - `OCR_TESSERACT_CMD`
-              指向本机 `tesseract.exe`，改完后需要重启 API / UI。
+              指向本机 `tesseract.exe`，支持相对项目根目录路径，也可用环境变量 `OCR_TESSERACT_CMD` / `TESSERACT_CMD` 覆盖；改完后需要重启 API / UI。
             - `OCR_MIN_CONFIDENCE / OCR_MIN_TEXT_LENGTH / OCR_MIN_MEANINGFUL_RATIO`
               控制 OCR 置信度过滤和乱码清洗，适合用来抑制无文字图片的假阳性。
             - `IMAGE_VLM_ENABLED`
@@ -478,7 +484,7 @@ def render_image_ingestion_panel() -> None:
             """# configs/kb_settings.yaml
 IMAGE_OCR_ENABLED: true
 IMAGE_OCR_LANGUAGE: chi_sim+eng
-OCR_TESSERACT_CMD: C:/Users/ASUS/tesseract-local/tesseract.exe
+OCR_TESSERACT_CMD: ./data/tools/Tesseract-OCR/tesseract.exe
 OCR_MIN_CONFIDENCE: 60.0
 OCR_MIN_TEXT_LENGTH: 6
 OCR_MIN_MEANINGFUL_RATIO: 0.6

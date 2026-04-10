@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -9,6 +10,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+DEFAULT_TESSERACT_RELATIVE_PATH = Path("./data/tools/Tesseract-OCR/tesseract.exe")
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,12 +104,13 @@ def preprocess_pdf_with_ocr(
             "OCR 预处理需要安装 `Pillow`。请先执行 `pip install -r requirements.txt`。"
         ) from exc
 
-    if tesseract_cmd:
-        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    resolved_tesseract_cmd = resolve_tesseract_cmd(tesseract_cmd)
+    if resolved_tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = resolved_tesseract_cmd
     elif not shutil.which("tesseract"):
         raise RuntimeError(
             "未检测到 `tesseract` 可执行文件。请先安装 Tesseract OCR，"
-            "或使用 `--tesseract-cmd <path>` 指定其完整路径。"
+            "或使用 `--tesseract-cmd <path>` / 环境变量 `OCR_TESSERACT_CMD` / `TESSERACT_CMD` 指定其完整路径。"
         )
 
     document = fitz.open(str(input_path))
@@ -131,6 +136,25 @@ def preprocess_pdf_with_ocr(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(page_separator.join(page_blocks).strip() + "\n", encoding="utf-8")
+
+
+def resolve_tesseract_cmd(cli_value: str) -> str:
+    for raw_value in (
+        cli_value.strip(),
+        os.getenv("OCR_TESSERACT_CMD", "").strip(),
+        os.getenv("TESSERACT_CMD", "").strip(),
+    ):
+        if not raw_value:
+            continue
+        candidate = Path(raw_value)
+        if not candidate.is_absolute():
+            candidate = (PROJECT_ROOT / candidate).resolve()
+        return str(candidate)
+
+    fallback = (PROJECT_ROOT / DEFAULT_TESSERACT_RELATIVE_PATH).resolve()
+    if fallback.exists():
+        return str(fallback)
+    return ""
 
 
 if __name__ == "__main__":
