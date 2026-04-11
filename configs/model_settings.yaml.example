@@ -32,7 +32,8 @@ TEMPERATURE: 0.3
 MAX_TOKENS: 2048
 ENABLE_STREAMING: true
 
-# 推荐通过环境变量注入敏感信息，而不是直接写入 model_settings.yaml：
+# 推荐通过环境变量注入敏感信息，而不是直接写入 model_settings.yaml。
+# 项目启动时会自动读取 `configs/.env`（如果存在），也支持直接读取系统环境变量：
 #   OPENAI_COMPATIBLE_API_KEY=<your_llm_api_key>
 #   OPENAI_COMPATIBLE_BASE_URL=<your_llm_base_url>
 #   IMAGE_VLM_API_KEY=<your_image_vlm_api_key>

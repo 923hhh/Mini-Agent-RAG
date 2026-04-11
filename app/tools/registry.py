@@ -33,6 +33,39 @@ def tool_names() -> set[str]:
     return set(_TOOL_REGISTRY.keys())
 
 
+def get_tool_definition(name: str) -> ToolDefinition | None:
+    tool = _TOOL_REGISTRY.get(name)
+    if tool is None:
+        return None
+    return tool.definition
+
+
+def resolve_tool_definitions(names: set[str] | None = None) -> list[ToolDefinition]:
+    if names is None:
+        return list_tools()
+    return [
+        tool.definition
+        for tool_name, tool in _TOOL_REGISTRY.items()
+        if tool_name in names
+    ]
+
+
+def build_langchain_tool_schemas(names: set[str] | None = None) -> list[dict[str, Any]]:
+    schemas: list[dict[str, Any]] = []
+    for definition in resolve_tool_definitions(names):
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "parameters": definition.parameters,
+                },
+            }
+        )
+    return schemas
+
+
 def execute_tool(
     name: str,
     settings: AppSettings,

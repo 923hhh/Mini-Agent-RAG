@@ -140,3 +140,55 @@
 - 若这些密钥此前已真实暴露到 git 历史，对应平台上的密钥轮换仍需要手动完成。
 - `M3` 已从“`@lru_cache` 缓存”进一步收口为“FastAPI 启动期加载 + 依赖注入”。
 - `O4` 已完成。
+
+## 2026-04-11 M1 环境变量链路补齐 + O6 Agent Tool Calling
+
+### 目标
+- 补齐 `M1` 的最后一段可用性链路：支持项目自动读取 `configs/.env`，避免把密钥改到环境变量后本地进程仍读不到。
+- 落地 `O6 / T3`：将 Agent 的工具选择升级为“优先 LLM 原生 tool calling，失败时回退启发式”。
+
+### 实施内容
+- 更新 `app/services/settings.py`：
+  - 新增 `load_project_env()`，会在 `load_settings()` 前自动读取：
+    - 项目根目录 `.env`
+    - `configs/.env`
+  - 采用“系统环境变量优先，`.env` 只补空位”的策略，不覆盖外部显式注入的值。
+- 新增模板文件：
+  - `configs/.env.example`
+- 更新 `configs/model_settings.yaml.example`：
+  - 明确说明项目会自动加载 `configs/.env`。
+- 更新 `app/tools/registry.py`：
+  - 新增工具定义解析与 LangChain tool schema 构造辅助函数，供 Agent tool calling 复用。
+- 重写 `app/agents/multistep.py` 中的工具规划路径：
+  - 新增 `AGENT_TOOL_PLANNING_SYSTEM_PROMPT`
+  - 新增 `select_next_tool_call_with_llm()`
+  - 新增工具历史与知识库证据摘要构造逻辑
+  - 规划策略改为：
+    - 先用 `build_chat_model(...).bind_tools(...)` 做单步工具规划
+    - 如果模型成功返回工具调用，按模型决策执行
+    - 如果模型不支持 / 调用失败 / 未给出工具，再回退到旧启发式规则
+- 更新 `app/ui/app.py`：
+  - 图片 VLM API Key 输入提示补充为“支持直接写入 `configs/.env`，项目启动时自动加载”。
+
+### 验证结果
+- 离线 smoke test 验证通过：
+  - `resolve_openai_compatible_api_key(settings)` 可从 `configs/.env` 解析到值
+  - `resolve_image_vlm_api_key(settings)` 可从 `configs/.env` 解析到值
+- Agent 规划离线校验通过：
+  - 当 LLM 返回 `calculate` tool call 时，`select_next_tool_call()` 能正确采用模型规划结果
+  - 当 LLM 未返回 tool call 时，知识库问题仍会回退为 `search_local_knowledge`
+  - 当 LLM 不可用时，时间问题仍会回退为 `current_time`
+- 相关文件已通过内存编译检查：
+  - `app/services/settings.py`
+  - `app/tools/registry.py`
+  - `app/agents/multistep.py`
+
+### 当前状态
+- `M1` 现在已具备完整本地使用链路：
+  - YAML 不保存密钥
+  - `configs/.env` 可自动加载
+  - UI 也会引导改用 `.env`
+- `O6 / T3` 已完成到可用版本：
+  - 工具选择已不再只依赖关键词
+  - 同时保留启发式回退，避免模型或 provider 不稳定时把 Agent 整体带崩
+- 后续若继续优化 Agent，可进一步把“最终答案生成”也切到基于 tool-calling 会话上下文统一生成，而不是沿用当前的结果归纳逻辑。

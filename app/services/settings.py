@@ -208,6 +208,11 @@ DEFAULT_CONFIG_MODELS: dict[str, type[BaseModel]] = {
     "model_settings.yaml": ModelSettings,
 }
 
+ENV_FILE_CANDIDATES = (
+    ".env",
+    "configs/.env",
+)
+
 SENSITIVE_CONFIG_FIELDS: dict[str, set[str]] = {
     "model_settings.yaml": {
         "OPENAI_COMPATIBLE_API_KEY",
@@ -235,6 +240,43 @@ def read_yaml_file(path: Path) -> dict[str, Any]:
 def write_yaml_file(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(dump_yaml(data), encoding="utf-8")
+
+
+def load_project_env(project_root: Path) -> list[Path]:
+    loaded_paths: list[Path] = []
+    for relative_path in ENV_FILE_CANDIDATES:
+        path = project_root / relative_path
+        if not path.exists() or not path.is_file():
+            continue
+        apply_env_file(path)
+        loaded_paths.append(path)
+    return loaded_paths
+
+
+def apply_env_file(path: Path) -> None:
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        normalized_key = key.strip()
+        if not normalized_key:
+            continue
+        os.environ.setdefault(normalized_key, normalize_env_value(raw_value.strip()))
+
+
+def normalize_env_value(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    if " #" in value:
+        return value.split(" #", 1)[0].rstrip()
+    return value
 
 
 def sanitize_config_data(
@@ -330,6 +372,7 @@ def save_config_values(
 
 
 def load_settings(project_root: Path) -> AppSettings:
+    load_project_env(project_root.resolve())
     normalized_project_root = str(project_root.resolve())
     return _load_settings_cached(normalized_project_root)
 

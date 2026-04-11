@@ -387,6 +387,7 @@ def render_image_ingestion_panel() -> None:
                 disabled=True,
                 placeholder="通过环境变量 IMAGE_VLM_API_KEY / ARK_API_KEY / VOLCENGINE_API_KEY 提供",
             )
+            st.caption("支持直接写入 `configs/.env`，项目启动时会自动加载。")
             if has_runtime_image_vlm_api_key:
                 st.success("已检测到运行时 VLM API Key。密钥不会写入 `model_settings.yaml`。")
             else:

@@ -18,15 +18,37 @@ from app.schemas.chat import (
     RetrievedReference,
     ToolCallRecord,
 )
+from app.services.llm_service import build_chat_model
 from app.services.reference_overview import build_reference_overview
 from app.services.settings import AppSettings
 from app.services.streaming_llm import stream_prompt_output
-from app.tools.registry import ToolExecutionResult, execute_tool, tool_names
+from app.tools.registry import (
+    ToolExecutionResult,
+    build_langchain_tool_schemas,
+    execute_tool,
+    resolve_tool_definitions,
+    tool_names,
+)
 
 
 AGENT_DIRECT_SYSTEM_PROMPT = """你是一个简洁、准确的中文智能体助手。
 当问题不需要调用工具时，直接回答即可。
 若问题信息不足，明确说明缺少什么信息，不要编造。"""
+
+AGENT_TOOL_PLANNING_SYSTEM_PROMPT = """你是一个负责规划下一步工具调用的中文智能体。
+你的任务不是直接展开长答案，而是判断“下一步是否需要调用一个工具”。
+
+请严格遵守以下规则：
+1. 每一轮最多调用一个工具；如果当前已足够回答，就不要调用工具。
+2. 如果 `knowledge_base_name` 已提供，且问题属于概念说明、文档问答、配置参数、项目资料检索，优先调用 `search_local_knowledge`，不要直接用常识跳过知识库。
+3. 如果问题明显是在求数学结果，且已经有明确表达式或已有检索结果里给出了足够数字，再调用 `calculate`。
+4. 如果问题明确要求“当前时间 / 今天日期 / 现在几点”，调用 `current_time`。
+5. 不要重复调用与已执行记录完全相同的工具和参数。
+6. 如果缺少某个工具所需参数，就不要硬调用。
+7. 如果用户要求“先查再算”，在检索出足够数字后，下一步应优先调用 `calculate`，而不是停在检索结果。
+
+如果需要工具，请只返回工具调用。
+如果不需要继续调用工具，请直接返回一小句说明。"""
 
 _TIME_KEYWORDS = (
     "当前时间",
@@ -88,6 +110,12 @@ class PlannedToolCall:
 class ExecutedToolRecord:
     tool_name: str
     result: ToolExecutionResult
+
+
+@dataclass(frozen=True)
+class ToolPlanningDecision:
+    plan: PlannedToolCall | None
+    used_llm: bool
 
 
 @dataclass
@@ -158,7 +186,7 @@ def execute_agent_plan(
     state = AgentExecutionState()
 
     for step_index in range(1, request.max_steps + 1):
-        plan = select_next_tool_call(request, state)
+        plan = select_next_tool_call(settings, request, state)
         if plan is None:
             break
 
@@ -236,7 +264,7 @@ def execute_agent_plan(
             return state
 
     if len(state.tool_calls) >= request.max_steps:
-        next_plan = select_next_tool_call(request, state)
+        next_plan = select_next_tool_call(settings, request, state)
         if next_plan is not None:
             stop_step = AgentStepRecord(
                 step_index=request.max_steps + 1,
@@ -254,6 +282,17 @@ def execute_agent_plan(
 
 
 def select_next_tool_call(
+    settings: AppSettings,
+    request: AgentChatRequest,
+    state: AgentExecutionState,
+) -> PlannedToolCall | None:
+    planning = select_next_tool_call_with_llm(settings, request, state)
+    if planning.used_llm and planning.plan is not None:
+        return planning.plan
+    return select_next_tool_call_heuristic(request, state)
+
+
+def select_next_tool_call_heuristic(
     request: AgentChatRequest,
     state: AgentExecutionState,
 ) -> PlannedToolCall | None:
@@ -302,6 +341,198 @@ def select_next_tool_call(
             )
 
     return None
+
+
+def select_next_tool_call_with_llm(
+    settings: AppSettings,
+    request: AgentChatRequest,
+    state: AgentExecutionState,
+) -> ToolPlanningDecision:
+    allowed = resolve_allowed_tools(request)
+    plannable_tools = resolve_plannable_tools(request, allowed)
+    if not plannable_tools:
+        return ToolPlanningDecision(plan=None, used_llm=True)
+
+    try:
+        llm = build_chat_model(
+            settings,
+            model_name=settings.model.AGENT_MODEL,
+            temperature=0.0,
+        )
+        bind_tools = getattr(llm, "bind_tools", None)
+        if not callable(bind_tools):
+            return ToolPlanningDecision(plan=None, used_llm=False)
+
+        prompt = build_agent_tool_planning_prompt()
+        variables = build_agent_tool_planning_variables(
+            request=request,
+            state=state,
+            plannable_tools=plannable_tools,
+        )
+        response = bind_tools(plannable_tools, tool_choice="auto").invoke(prompt.invoke(variables))
+    except Exception:
+        return ToolPlanningDecision(plan=None, used_llm=False)
+
+    tool_calls = extract_tool_calls_from_response(response)
+    if not tool_calls:
+        return ToolPlanningDecision(plan=None, used_llm=True)
+
+    first_call = tool_calls[0]
+    tool_name = str(first_call.get("name", "")).strip()
+    arguments = coerce_tool_call_arguments(first_call.get("args"))
+    if not tool_name or tool_name not in allowed:
+        return ToolPlanningDecision(plan=None, used_llm=False)
+    if tool_name == "search_local_knowledge" and not request.knowledge_base_name.strip():
+        return ToolPlanningDecision(plan=None, used_llm=False)
+
+    return ToolPlanningDecision(
+        plan=PlannedToolCall(
+            tool_name=tool_name,
+            arguments=arguments,
+            reason="由 LLM tool calling 规划得出下一步工具调用。",
+        ),
+        used_llm=True,
+    )
+
+
+def resolve_plannable_tools(
+    request: AgentChatRequest,
+    allowed: set[str],
+) -> list[dict[str, Any]]:
+    names = set(allowed)
+    if not request.knowledge_base_name.strip():
+        names.discard("search_local_knowledge")
+    return build_langchain_tool_schemas(names)
+
+
+def build_agent_tool_planning_prompt() -> ChatPromptTemplate:
+    return ChatPromptTemplate.from_messages(
+        [
+            ("system", AGENT_TOOL_PLANNING_SYSTEM_PROMPT),
+            MessagesPlaceholder("history"),
+            (
+                "human",
+                "用户问题：\n{query}\n\n"
+                "knowledge_base_name：{knowledge_base_name}\n\n"
+                "可用工具：\n{available_tools}\n\n"
+                "已执行工具记录：\n{tool_history}\n\n"
+                "当前已获得的上下文：\n{observation_context}\n\n"
+                "如果还需要工具，请只调用一个最合适的工具；"
+                "如果已经足够回答或当前无法继续获取有效信息，就直接返回一小句说明，不要再调用工具。",
+            ),
+        ]
+    )
+
+
+def build_agent_tool_planning_variables(
+    *,
+    request: AgentChatRequest,
+    state: AgentExecutionState,
+    plannable_tools: list[dict[str, Any]],
+) -> dict[str, object]:
+    return {
+        "history": convert_history(request.history),
+        "query": request.query,
+        "knowledge_base_name": request.knowledge_base_name.strip() or "（未提供）",
+        "available_tools": format_available_tools_for_planning(plannable_tools),
+        "tool_history": format_tool_history_for_planning(state),
+        "observation_context": build_agent_observation_context(state),
+    }
+
+
+def format_available_tools_for_planning(plannable_tools: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for tool in plannable_tools:
+        function = tool.get("function", {})
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name", "")).strip()
+        description = str(function.get("description", "")).strip()
+        parameters = function.get("parameters", {})
+        required = parameters.get("required", []) if isinstance(parameters, dict) else []
+        required_text = ", ".join(str(item) for item in required) if isinstance(required, list) else ""
+        lines.append(
+            f"- {name}: {description}"
+            + (f" 必填参数: {required_text}" if required_text else "")
+        )
+    return "\n".join(lines) if lines else "（无可用工具）"
+
+
+def format_tool_history_for_planning(state: AgentExecutionState) -> str:
+    if not state.tool_calls:
+        return "（尚未执行任何工具）"
+
+    lines: list[str] = []
+    for item in state.tool_calls[-4:]:
+        lines.append(
+            f"- step={item.step_index} tool={item.tool_name} status={item.status} "
+            f"args={json.dumps(item.arguments, ensure_ascii=False, sort_keys=True)} "
+            f"output={item.output or item.error_message or ''}"
+        )
+    return "\n".join(lines)
+
+
+def build_agent_observation_context(state: AgentExecutionState) -> str:
+    parts: list[str] = []
+    if state.references:
+        parts.append("知识库证据：")
+        for reference in state.references[:4]:
+            metadata_bits = [f"source={reference.source}"]
+            if reference.section_title:
+                metadata_bits.append(f"section={reference.section_title}")
+            if reference.page is not None:
+                metadata_bits.append(f"page={reference.page}")
+            snippet = " ".join(reference.content.split())[:320]
+            parts.append(f"- {' | '.join(metadata_bits)} | content={snippet}")
+    if state.executed_tools:
+        parts.append("工具输出：")
+        for record in state.executed_tools[-4:]:
+            parts.append(f"- {record.tool_name}: {record.result.output}")
+    return "\n".join(parts) if parts else "（当前没有额外上下文）"
+
+
+def extract_tool_calls_from_response(response: Any) -> list[dict[str, Any]]:
+    raw_tool_calls = getattr(response, "tool_calls", None)
+    if isinstance(raw_tool_calls, list):
+        return [item for item in raw_tool_calls if isinstance(item, dict)]
+
+    additional_kwargs = getattr(response, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        return []
+    tool_calls = additional_kwargs.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in tool_calls:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function", {})
+        if not isinstance(function, dict):
+            continue
+        normalized.append(
+            {
+                "name": function.get("name"),
+                "args": function.get("arguments"),
+            }
+        )
+    return normalized
+
+
+def coerce_tool_call_arguments(raw_arguments: Any) -> dict[str, Any]:
+    if isinstance(raw_arguments, dict):
+        return dict(raw_arguments)
+    if isinstance(raw_arguments, str):
+        normalized = raw_arguments.strip()
+        if not normalized:
+            return {}
+        try:
+            payload = json.loads(normalized)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def resolve_allowed_tools(request: AgentChatRequest) -> set[str]:
@@ -522,8 +753,6 @@ def generate_direct_answer(
         "history": convert_history(request.history),
         "query": request.query,
     }
-    from app.services.llm_service import build_chat_model
-
     llm = build_chat_model(
         settings,
         model_name=settings.model.AGENT_MODEL,
