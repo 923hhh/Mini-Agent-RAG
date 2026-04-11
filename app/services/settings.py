@@ -35,6 +35,8 @@ class KBSettings(BaseModel):
     VECTOR_SEARCH_TOP_K: int = 4
     SCORE_THRESHOLD: float = 0.5
     ENABLE_QUERY_REWRITE: bool = True
+    ENABLE_MULTI_QUERY_RETRIEVAL: bool = True
+    ENABLE_HYDE: bool = False
     ENABLE_HYBRID_RETRIEVAL: bool = True
     ENABLE_HEURISTIC_RERANK: bool = True
     ENABLE_MODEL_RERANK: bool = False
@@ -48,6 +50,7 @@ class KBSettings(BaseModel):
     HYBRID_LEXICAL_TOP_K: int = Field(default=30, ge=1, le=100)
     HYBRID_RERANK_TOP_K: int = Field(default=5, ge=1, le=50)
     HYBRID_RRF_K: int = Field(default=60, ge=1, le=200)
+    MULTI_QUERY_MAX_QUERIES: int = Field(default=3, ge=1, le=6)
     RERANK_CANDIDATES_TOP_N: int = Field(default=12, ge=1, le=50)
     RERANK_SCORE_THRESHOLD: float = Field(default=0.0, ge=0.0, le=1.0)
     RERANK_FALLBACK_TO_HEURISTIC: bool = True

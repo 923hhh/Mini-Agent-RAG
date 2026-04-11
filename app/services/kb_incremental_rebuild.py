@@ -8,6 +8,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from app.loaders.documents import list_supported_files
@@ -27,7 +28,7 @@ class CachedChunkEntry(BaseModel):
     chunk_id: str
     page_content: str
     metadata: dict[str, Any]
-    embedding: list[float]
+    embedding: list[float] | None = None
     content_sha256: str
 
 
@@ -327,7 +328,7 @@ def plan_rebuild(
             plans.append(FileBuildPlan(snapshot=snapshot, change_kind=change_kind, manifest_entry=previous_entry))
             continue
         cache_path = chunk_cache_dir / previous_entry.cache_file
-        if not cache_path.exists() or not settings.kb.ENABLE_FILE_HASH_CACHE:
+        if not is_chunk_cache_available(cache_path) or not settings.kb.ENABLE_FILE_HASH_CACHE:
             plans.append(FileBuildPlan(snapshot=snapshot, change_kind="modified", manifest_entry=previous_entry))
             continue
         if previous_entry.size_bytes == snapshot.size_bytes and abs(previous_entry.modified_at - snapshot.modified_at) < 1e-6:
@@ -459,6 +460,8 @@ def build_caches_for_plans(
             "embedding": embedding_seconds,
         },
     )
+
+
 def load_cached_caches_for_plans(
     plans: list[FileBuildPlan],
     chunk_cache_dir: Path,
@@ -557,12 +560,45 @@ def write_build_manifest(path: Path, manifest: KnowledgeBaseBuildManifest) -> No
 
 
 def load_chunk_cache(path: Path) -> FileChunkCache:
-    return FileChunkCache.model_validate_json(path.read_text(encoding="utf-8"))
+    cache = FileChunkCache.model_validate_json(path.read_text(encoding="utf-8"))
+    embedding_path = chunk_cache_embedding_path(path)
+    if embedding_path.exists():
+        embeddings = load_chunk_cache_embeddings(embedding_path)
+        if len(cache.chunk_entries) != embeddings.shape[0]:
+            raise ValueError(
+                f"切片缓存向量数量与 metadata 不一致: {path} "
+                f"(entries={len(cache.chunk_entries)}, embeddings={embeddings.shape[0]})"
+            )
+        for index, entry in enumerate(cache.chunk_entries):
+            entry.embedding = normalize_embedding_vector(embeddings[index])
+        return cache
+
+    missing_embedding_entries = [
+        entry.chunk_id for entry in cache.chunk_entries if entry.embedding is None
+    ]
+    if missing_embedding_entries:
+        raise FileNotFoundError(
+            f"切片向量缓存不存在: {embedding_path}，且 metadata 中也没有内嵌 embedding。"
+        )
+    return cache
 
 
 def write_chunk_cache(path: Path, cache: FileChunkCache) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(cache.model_dump_json(indent=2), encoding="utf-8")
+    embedding_path = chunk_cache_embedding_path(path)
+    np.save(
+        embedding_path,
+        build_chunk_cache_embedding_matrix(cache),
+        allow_pickle=False,
+    )
+    payload = cache.model_dump()
+    for entry in payload.get("chunk_entries", []):
+        if isinstance(entry, dict):
+            entry.pop("embedding", None)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def load_metadata_records(path: Path) -> list[DocumentChunkRecord]:
@@ -584,10 +620,66 @@ def cleanup_deleted_caches(chunk_cache_dir: Path, deleted_entries: list[BuildMan
         cache_path = chunk_cache_dir / entry.cache_file
         if cache_path.exists():
             cache_path.unlink(missing_ok=True)
+        embedding_path = chunk_cache_embedding_path(cache_path)
+        if embedding_path.exists():
+            embedding_path.unlink(missing_ok=True)
 
 
 def chunk_cache_filename(relative_path: str) -> str:
     return f"{sha1(relative_path.encode('utf-8')).hexdigest()[:20]}.json"
+
+
+def chunk_cache_embedding_path(cache_path: Path) -> Path:
+    return cache_path.with_suffix(".npy")
+
+
+def is_chunk_cache_available(cache_path: Path) -> bool:
+    if not cache_path.exists():
+        return False
+    if chunk_cache_embedding_path(cache_path).exists():
+        return True
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    chunk_entries = payload.get("chunk_entries")
+    if not isinstance(chunk_entries, list):
+        return False
+    if not chunk_entries:
+        return True
+    return all(
+        isinstance(entry, dict) and entry.get("embedding") is not None
+        for entry in chunk_entries
+    )
+
+
+def build_chunk_cache_embedding_matrix(cache: FileChunkCache) -> np.ndarray:
+    if not cache.chunk_entries:
+        return np.empty((0, 0), dtype=np.float32)
+
+    rows: list[list[float]] = []
+    for entry in cache.chunk_entries:
+        if entry.embedding is None:
+            raise ValueError(f"切片缓存缺少 embedding: {entry.chunk_id}")
+        rows.append(entry.embedding)
+    return np.asarray(rows, dtype=np.float32)
+
+
+def load_chunk_cache_embeddings(path: Path) -> np.ndarray:
+    embeddings = np.load(path, allow_pickle=False)
+    if embeddings.size == 0:
+        return np.empty((0, 0), dtype=np.float32)
+    if embeddings.ndim == 1:
+        return embeddings.reshape(1, -1).astype(np.float32, copy=False)
+    if embeddings.ndim != 2:
+        raise ValueError(f"不支持的切片向量缓存维度: {path} -> {embeddings.shape}")
+    return embeddings.astype(np.float32, copy=False)
+
+
+def normalize_embedding_vector(vector: np.ndarray) -> list[float]:
+    if vector.ndim != 1:
+        raise ValueError(f"期望单条 embedding 为一维向量，实际维度: {vector.shape}")
+    return [float(item) for item in vector.tolist()]
 
 
 def compute_file_sha256(path: Path) -> str:
@@ -603,7 +695,11 @@ def compute_file_sha256(path: Path) -> str:
 
 def hash_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
+
+
 def cached_entry_to_vector_entry(entry: CachedChunkEntry) -> VectorStoreEntry:
+    if entry.embedding is None:
+        raise ValueError(f"切片缓存缺少 embedding，无法写入向量库: {entry.chunk_id}")
     return VectorStoreEntry(
         chunk_id=entry.chunk_id,
         page_content=entry.page_content,

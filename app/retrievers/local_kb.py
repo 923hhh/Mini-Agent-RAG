@@ -13,7 +13,7 @@ from app.constants import IMAGE_QUERY_HINTS
 from app.schemas.chat import ChatMessage, RetrievedReference
 from app.services.embedding_service import build_embeddings
 from app.services.observability import append_jsonl_trace
-from app.services.query_rewrite_service import rewrite_query_for_retrieval
+from app.services.query_rewrite_service import generate_hypothetical_doc, generate_multi_queries
 from app.services.rerank_service import RerankTextInput, rerank_texts
 from app.services.settings import AppSettings
 from app.services.temp_kb_service import ensure_temp_knowledge_available
@@ -145,15 +145,28 @@ def search_vector_store(
     if not filtered_documents:
         return []
 
-    rewritten_query = rewrite_query_for_retrieval(settings, query, history)
-    query_bundle = build_query_bundle(query, rewritten_query)
-    retrieval_diagnostics: dict[str, object] = {}
+    query_candidates = generate_multi_queries(settings, query, history)
+    rewritten_query = query_candidates[1] if len(query_candidates) > 1 else query.strip()
+    query_bundle = build_query_bundle(query_candidates)
+    dense_query_bundle = build_dense_query_bundle(
+        query_bundle,
+        generate_hypothetical_doc(settings, query, history),
+    )
+    retrieval_diagnostics: dict[str, object] = {
+        "query_bundle_count": len(query_bundle),
+        "dense_query_bundle_count": len(dense_query_bundle),
+        "hyde_enabled": settings.kb.ENABLE_HYDE,
+        "hyde_used": len(dense_query_bundle) > len(query_bundle),
+    }
+    if len(dense_query_bundle) > len(query_bundle):
+        retrieval_diagnostics["hyde_preview"] = dense_query_bundle[-1][:160]
     query_profile = infer_query_modality_profile(query_bundle)
     candidates = retrieve_candidates(
         settings=settings,
         vector_store=vector_store,
         all_documents=filtered_documents,
         query_bundle=query_bundle,
+        dense_query_bundle=dense_query_bundle,
         top_k=top_k,
         metadata_filters=metadata_filters,
         query_profile=query_profile,
@@ -229,6 +242,7 @@ def retrieve_candidates(
     vector_store: BaseVectorStoreAdapter,
     all_documents: dict[str, Document],
     query_bundle: list[str],
+    dense_query_bundle: list[str] | None,
     top_k: int,
     metadata_filters: MetadataFilters | None = None,
     query_profile: QueryModalityProfile | None = None,
@@ -236,6 +250,7 @@ def retrieve_candidates(
 ) -> list[RetrievalCandidate]:
     candidate_map: dict[str, RetrievalCandidate] = {}
     dense_limit = max(top_k, settings.kb.HYBRID_DENSE_TOP_K)
+    dense_queries = dense_query_bundle or query_bundle
     query_profile = query_profile or infer_query_modality_profile(query_bundle)
     modality_groups = group_documents_by_source_modality(all_documents)
     modality_grouped_dense_used = should_use_modality_grouped_dense_retrieval(
@@ -262,7 +277,7 @@ def retrieve_candidates(
         for source_modality in select_modalities_for_query(modality_groups, query_profile):
             collect_dense_candidates(
                 vector_store=vector_store,
-                query_bundle=query_bundle,
+                query_bundle=dense_queries,
                 dense_limit=per_modality_dense_limit,
                 candidate_map=candidate_map,
                 metadata_filters=merge_metadata_filters_with_source_modality(
@@ -274,7 +289,7 @@ def retrieve_candidates(
     else:
         collect_dense_candidates(
             vector_store=vector_store,
-            query_bundle=query_bundle,
+            query_bundle=dense_queries,
             dense_limit=dense_limit,
             candidate_map=candidate_map,
             metadata_filters=metadata_filters,
@@ -744,9 +759,9 @@ def build_lexical_doc_infos(all_documents: dict[str, Document]) -> dict[str, dic
     return infos
 
 
-def build_query_bundle(query: str, rewritten_query: str) -> list[str]:
+def build_query_bundle(query_candidates: list[str]) -> list[str]:
     queries: list[str] = []
-    for item in (query, rewritten_query):
+    for item in query_candidates:
         normalized = item.strip()
         if normalized and normalized not in queries:
             queries.append(normalized)
@@ -754,6 +769,14 @@ def build_query_bundle(query: str, rewritten_query: str) -> list[str]:
         if expanded not in queries:
             queries.append(expanded)
     return queries
+
+
+def build_dense_query_bundle(query_bundle: list[str], hypothetical_doc: str) -> list[str]:
+    dense_queries = list(query_bundle)
+    normalized_hypothetical_doc = hypothetical_doc.strip()
+    if normalized_hypothetical_doc and normalized_hypothetical_doc not in dense_queries:
+        dense_queries.append(normalized_hypothetical_doc)
+    return dense_queries
 
 
 def build_image_query_expansions(query_bundle: list[str]) -> list[str]:
@@ -1099,9 +1122,14 @@ def append_retrieval_trace(
             "knowledge_base_name": vector_store_dir.name,
             "query": query,
             "rewritten_query": rewritten_query,
-            "query_bundle": query_bundle[:3],
+            "query_bundle": query_bundle[:6],
+            "query_bundle_count": diagnostics.get("query_bundle_count", len(query_bundle)),
+            "dense_query_bundle_count": diagnostics.get("dense_query_bundle_count", len(query_bundle)),
             "top_k": top_k,
             "metadata_filter_count": len(metadata_filters.filters) if metadata_filters else 0,
+            "hyde_enabled": diagnostics.get("hyde_enabled", False),
+            "hyde_used": diagnostics.get("hyde_used", False),
+            "hyde_preview": diagnostics.get("hyde_preview", ""),
             "query_type": diagnostics.get("query_type", "unknown"),
             "preferred_modalities": diagnostics.get("preferred_modalities", []),
             "available_modalities": diagnostics.get("available_modalities", {}),

@@ -192,3 +192,109 @@
   - 工具选择已不再只依赖关键词
   - 同时保留启发式回退，避免模型或 provider 不稳定时把 Agent 整体带崩
 - 后续若继续优化 Agent，可进一步把“最终答案生成”也切到基于 tool-calling 会话上下文统一生成，而不是沿用当前的结果归纳逻辑。
+
+## 2026-04-11 T6 chunk cache 改用 numpy 存储
+
+### 目标
+- 将增量重建的 chunk cache 从“JSON 内联 embedding”改为“JSON metadata + `.npy` 向量 sidecar”。
+- 保留对旧版 JSON 内联 embedding cache 的读取兼容，避免历史缓存直接失效。
+- 为 Phase 7 校验脚本补充回归断言，确保后续不会把 embedding 又写回 metadata。
+
+### 实施内容
+- 更新 `app/services/kb_incremental_rebuild.py`：
+  - `CachedChunkEntry.embedding` 改为可空，支持先加载 metadata、后回填向量。
+  - 新增：
+    - `chunk_cache_embedding_path()`
+    - `is_chunk_cache_available()`
+    - `build_chunk_cache_embedding_matrix()`
+    - `load_chunk_cache_embeddings()`
+    - `normalize_embedding_vector()`
+  - `write_chunk_cache()` 改为：
+    - metadata 继续写入 `.json`
+    - embedding 单独写入同名 `.npy`
+    - metadata 中移除内联 `embedding`
+  - `load_chunk_cache()` 改为：
+    - 优先读取 `.npy` sidecar 并回填到 `chunk_entries`
+    - 若 `.npy` 不存在，则兼容读取旧版 JSON 内联 `embedding`
+  - `cleanup_deleted_caches()` 删除缓存时同步清理 `.npy`
+  - `plan_rebuild()` 复用 `is_chunk_cache_available()`，兼容新旧缓存格式
+- 更新 `scripts/validate_phase7.py`：
+  - 为增量重建新增 `incremental_chunk_cache_numpy` 校验项
+  - 断言 `.npy` 文件存在、metadata 不再内联 embedding、`load_chunk_cache()` 能正确回填 embedding
+- 更新 `requirements.txt`：
+  - 显式补充 `numpy>=1.26,<3`
+
+### 验证结果
+- 相关文件已通过内存编译检查：
+  - `app/services/kb_incremental_rebuild.py`
+  - `scripts/validate_phase7.py`
+- 离线 smoke test 验证通过：
+  - 新格式会写出 `*.json + *.npy`
+  - metadata 中不再保存内联 `embedding`
+  - `load_chunk_cache()` 能从 `.npy` 回填向量
+  - 旧版 JSON 内联 `embedding` cache 仍可正常加载
+  - 生成的 embedding 矩阵为 `float32`
+
+### 当前状态
+- `T6` 已完成。
+- chunk cache 现在采用“文本 metadata 与向量分离存储”的结构，后续增量重建的缓存体积和读写成本都更可控。
+
+## 2026-04-11 T1 / T2 多查询检索与 HyDE 落地
+
+### 目标
+- 落地 `T1`：把单条 query rewrite 升级为多角度查询扩展，提高召回覆盖面。
+- 落地 `T2`：为 dense 检索增加 HyDE 假设文档路径，同时保持 lexical 检索继续使用原始问题和多查询集合。
+- 补充离线回归，确保多查询顺序、去重、HyDE 注入范围都稳定可测。
+
+### 实施内容
+- 更新 `app/services/query_rewrite_service.py`：
+  - 保留原有单条改写 prompt，并新增：
+    - `MULTI_QUERY_REWRITE_PROMPT`
+    - `HYDE_PROMPT`
+  - 新增：
+    - `generate_multi_queries()`
+    - `generate_hypothetical_doc()`
+    - 多查询解析、去重、长度约束、列表前缀清洗工具函数
+  - 多查询策略改为：
+    - 原始问题始终保留在第 1 位
+    - 若开启 `ENABLE_MULTI_QUERY_RETRIEVAL`，优先生成“直接改写 + 答案关键词补充”两条候选
+    - 若多查询失败，则回退到单条 rewrite
+- 更新 `app/retrievers/local_kb.py`：
+  - 检索入口改为消费 `generate_multi_queries()` 结果
+  - `build_query_bundle()` 改为接收 query list，而不是“原问题 + 单条 rewrite”
+  - 新增 `build_dense_query_bundle()`：
+    - lexical / query profile 仍然只使用多查询 bundle
+    - HyDE 假设文档只追加到 dense bundle，不污染 BM25 / rerank / modality profile
+  - retrieval trace 新增：
+    - `query_bundle_count`
+    - `dense_query_bundle_count`
+    - `hyde_enabled`
+    - `hyde_used`
+    - `hyde_preview`
+- 更新配置：
+  - `app/services/settings.py`
+  - `configs/kb_settings.yaml`
+  - 新增：
+    - `ENABLE_MULTI_QUERY_RETRIEVAL`
+    - `MULTI_QUERY_MAX_QUERIES`
+    - `ENABLE_HYDE`
+- 更新 `scripts/validate_phase7.py`：
+  - 新增 `multi_query_rewrite` 离线 mock 校验
+  - 新增 `hyde_generation` 离线 mock 校验
+
+### 验证结果
+- 相关文件已通过内存编译检查：
+  - `app/services/query_rewrite_service.py`
+  - `app/retrievers/local_kb.py`
+  - `app/services/settings.py`
+  - `scripts/validate_phase7.py`
+- 离线 smoke test 验证通过：
+  - 多查询生成会保留原始问题，并输出去重后的扩展查询
+  - `rewrite_query_for_retrieval()` 会稳定返回第 1 条扩展查询
+  - 多查询失败时，会自动回退为单条 rewrite
+  - HyDE 文本只会追加到 dense query bundle 末尾
+  - lexical query bundle 顺序与内容不会因 HyDE 被改写
+
+### 当前状态
+- `T1` 已完成到可用版本。
+- `T2` 已完成到可用版本，且默认通过 `ENABLE_HYDE=false` 控制，避免额外 LLM 开销直接影响现有链路。

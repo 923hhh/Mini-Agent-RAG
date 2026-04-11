@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 import uvicorn
@@ -20,8 +21,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.api.main import app
-from app.retrievers.local_kb import search_local_knowledge_base
+from app.retrievers.local_kb import build_dense_query_bundle, build_query_bundle, search_local_knowledge_base
+from app.services.kb_incremental_rebuild import chunk_cache_embedding_path, load_chunk_cache
 from app.services.llm_service import build_chat_model, normalize_llm_provider, resolve_openai_compatible_api_key
+from app.services.query_rewrite_service import generate_hypothetical_doc, generate_multi_queries
 from app.services.rerank_service import RerankTextInput, rerank_texts
 from app.services.settings import load_settings
 from app.services.temp_kb_service import (
@@ -119,6 +122,50 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     assert checks["llm_provider_switching"]["api_provider_alias"] == "openai_compatible", "api provider alias mismatch"
     assert checks["llm_provider_switching"]["api_key_resolved"] == "demo-key", "api provider key resolve failed"
 
+    multi_query_input = "电机额定电流和过载保护参数在说明书哪里看"
+    with patch(
+        "app.services.query_rewrite_service._invoke_multi_query_rewrite",
+        return_value=[
+            "电机 额定电流 过载保护 参数 说明书",
+            "电机说明书 额定电流 过载保护 故障 排查",
+        ],
+    ):
+        multi_queries = generate_multi_queries(settings, multi_query_input)
+    multi_query_bundle = build_query_bundle(multi_queries)
+    checks["multi_query_rewrite"] = {
+        "query_count": len(multi_queries),
+        "query_bundle_count": len(multi_query_bundle),
+        "queries": multi_queries,
+    }
+    assert multi_queries[0] == multi_query_input, "multi query should keep original query first"
+    assert len(multi_queries) == 3, "multi query should expand to original + 2 rewrites"
+    assert len(set(multi_queries)) == len(multi_queries), "multi query should deduplicate rewritten queries"
+    assert multi_query_bundle[: len(multi_queries)] == multi_queries, "query bundle should preserve multi query order"
+
+    hyde_settings = settings.model_copy(
+        update={
+            "kb": settings.kb.model_copy(
+                update={
+                    "ENABLE_HYDE": True,
+                }
+            )
+        }
+    )
+    with patch(
+        "app.services.query_rewrite_service._invoke_hypothetical_doc_generation",
+        return_value="The motor manual usually lists rated current, overload protection thresholds, and related troubleshooting notes in the electrical parameter section.",
+    ):
+        hypothetical_doc = generate_hypothetical_doc(hyde_settings, multi_query_input)
+    dense_query_bundle = build_dense_query_bundle(multi_query_bundle, hypothetical_doc)
+    checks["hyde_generation"] = {
+        "hypothetical_doc": hypothetical_doc,
+        "dense_query_bundle_count": len(dense_query_bundle),
+        "dense_query_tail": dense_query_bundle[-1] if dense_query_bundle else "",
+    }
+    assert hypothetical_doc, "hyde should generate hypothetical document text when enabled"
+    assert dense_query_bundle[-1] == hypothetical_doc, "hyde text should only append to dense retrieval bundle"
+    assert dense_query_bundle[: len(multi_query_bundle)] == multi_query_bundle, "hyde should not reorder lexical query bundle"
+
     rebuild_status_code, rebuild_json = submit_rebuild_and_wait(
         client,
         {"knowledge_base_name": "phase2_demo"},
@@ -153,6 +200,31 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     assert incremental_full_json.get("index_mode") == "full", "initial incremental rebuild should be full"
     assert incremental_full_json.get("files_rebuilt") == 2, "initial incremental rebuild file count mismatch"
     assert incremental_full_json.get("chunks_embedded", 0) >= 2, "initial incremental rebuild did not embed chunks"
+
+    chunk_cache_dir = settings.vector_store_chunk_cache_dir(incremental_kb_name)
+    chunk_cache_files = sorted(chunk_cache_dir.glob("*.json"))
+    assert chunk_cache_files, "incremental rebuild did not write chunk cache metadata"
+    first_chunk_cache = chunk_cache_files[0]
+    first_embedding_cache = chunk_cache_embedding_path(first_chunk_cache)
+    loaded_chunk_cache = load_chunk_cache(first_chunk_cache)
+    raw_chunk_cache_payload = json.loads(first_chunk_cache.read_text(encoding="utf-8"))
+    first_raw_entry = raw_chunk_cache_payload.get("chunk_entries", [{}])[0]
+    checks["incremental_chunk_cache_numpy"] = {
+        "metadata_cache_file": str(first_chunk_cache),
+        "embedding_cache_file": str(first_embedding_cache),
+        "embedding_cache_exists": first_embedding_cache.exists(),
+        "chunk_entry_count": len(loaded_chunk_cache.chunk_entries),
+        "embedding_loaded": bool(
+            loaded_chunk_cache.chunk_entries and loaded_chunk_cache.chunk_entries[0].embedding
+        ),
+        "embedding_in_metadata": bool(
+            isinstance(first_raw_entry, dict) and "embedding" in first_raw_entry
+        ),
+    }
+    assert first_embedding_cache.exists(), "chunk cache embedding npy file missing"
+    assert loaded_chunk_cache.chunk_entries, "chunk cache metadata contains no chunk entries"
+    assert loaded_chunk_cache.chunk_entries[0].embedding, "chunk cache did not load embedding from cache"
+    assert not checks["incremental_chunk_cache_numpy"]["embedding_in_metadata"], "chunk cache metadata still stores embedding inline"
 
     incremental_reuse_status_code, incremental_reuse_json = submit_rebuild_and_wait(
         client,
