@@ -7,9 +7,13 @@ from app.agents.multistep import run_agent, stream_agent_events, validate_agent_
 from app.api.dependencies import SettingsDep
 from app.api.errors import error_payload
 from app.api.streaming import SSE_MEDIA_TYPE, sse_event
-from app.chains.rag import generate_rag_answer
-from app.chains.rag import stream_rag_answer
-from app.retrievers.local_kb import search_local_knowledge_base, search_temp_knowledge_base
+from app.chains.rag import generate_rag_answer, maybe_run_corrective_retrieval, stream_rag_answer
+from app.retrievers.local_kb import (
+    search_local_knowledge_base,
+    search_local_knowledge_base_second_pass,
+    search_temp_knowledge_base,
+    search_temp_knowledge_base_second_pass,
+)
 from app.schemas.chat import AgentChatRequest, AgentChatResponse, ChatRequest, ChatResponse
 from app.services.reference_overview import build_reference_overview
 from app.services.temp_kb_service import TempKnowledgeBaseExpiredError
@@ -39,6 +43,25 @@ def resolve_rag_request(
                 metadata_filters=request.metadata_filters,
             )
             target_name = request.knowledge_base_name
+            references = maybe_run_corrective_retrieval(
+                settings=settings,
+                query=request.query,
+                references=references,
+                history=request.history,
+                top_k=request.top_k,
+                score_threshold=request.score_threshold,
+                retrieve=lambda corrective_query, corrective_top_k, corrective_threshold: search_local_knowledge_base_second_pass(
+                    settings=settings,
+                    knowledge_base_name=request.knowledge_base_name,
+                    query=corrective_query,
+                    top_k=corrective_top_k,
+                    score_threshold=corrective_threshold,
+                    history=request.history,
+                    metadata_filters=request.metadata_filters,
+                ),
+                source_type=request.source_type,
+                target_name=target_name,
+            )
         elif request.source_type == "temp_kb":
             if not request.knowledge_id:
                 raise HTTPException(
@@ -55,6 +78,25 @@ def resolve_rag_request(
                 metadata_filters=request.metadata_filters,
             )
             target_name = request.knowledge_id
+            references = maybe_run_corrective_retrieval(
+                settings=settings,
+                query=request.query,
+                references=references,
+                history=request.history,
+                top_k=request.top_k,
+                score_threshold=request.score_threshold,
+                retrieve=lambda corrective_query, corrective_top_k, corrective_threshold: search_temp_knowledge_base_second_pass(
+                    settings=settings,
+                    knowledge_id=request.knowledge_id,
+                    query=corrective_query,
+                    top_k=corrective_top_k,
+                    score_threshold=corrective_threshold,
+                    history=request.history,
+                    metadata_filters=request.metadata_filters,
+                ),
+                source_type=request.source_type,
+                target_name=target_name,
+            )
         else:
             raise HTTPException(
                 status_code=400,

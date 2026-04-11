@@ -29,6 +29,7 @@ from app.tools.registry import (
     resolve_tool_definitions,
     tool_names,
 )
+from app.utils.text import deduplicate_strings
 
 
 AGENT_DIRECT_SYSTEM_PROMPT = """你是一个简洁、准确的中文智能体助手。
@@ -851,25 +852,14 @@ def extract_numbers_from_references(
             tokens.append(match)
 
     if len(tokens) >= 2:
-        return unique_preserve_order(tokens)
+        return deduplicate_strings(tokens)
 
     fallback = re.findall(r"-?\d+(?:\.\d+)?", combined)
-    return unique_preserve_order(tokens + fallback)
+    return deduplicate_strings(tokens + fallback)
 
 
 def extract_identifier_terms(query: str) -> list[str]:
-    return unique_preserve_order(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", query))
-
-
-def unique_preserve_order(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
+    return deduplicate_strings(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", query))
 
 
 def detect_math_operation(query: str) -> str:

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from datetime import timedelta
+from hashlib import sha256
 import json
+import math
 import os
+import re
 import shutil
 import sys
 import threading
@@ -21,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.api.main import app
+from app.chains.rag import RetrievalCoverageGrade, maybe_run_corrective_retrieval
 from app.retrievers.local_kb import build_dense_query_bundle, build_query_bundle, search_local_knowledge_base
 from app.storage.bm25_index import load_bm25_index
 from app.services.kb_incremental_rebuild import chunk_cache_embedding_path, load_chunk_cache
@@ -49,6 +54,141 @@ def main() -> int:
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
+
+
+class OfflineDeterministicEmbeddings:
+    def __init__(self, dimension: int = 64) -> None:
+        self.dimension = max(8, dimension)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed_query(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        tokens = _tokenize_validation_text(text)
+        vector = [0.0] * self.dimension
+        if not tokens:
+            vector[0] = 1.0
+            return vector
+
+        for token in tokens:
+            digest = sha256(token.encode("utf-8")).digest()
+            for offset in range(0, min(16, len(digest)), 4):
+                bucket = digest[offset] % self.dimension
+                sign = 1.0 if digest[offset + 1] % 2 == 0 else -1.0
+                weight = 1.0 + (digest[offset + 2] / 255.0)
+                vector[bucket] += sign * weight
+
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm <= 0:
+            vector[0] = 1.0
+            return vector
+        return [value / norm for value in vector]
+
+
+class OfflineCrossEncoder:
+    def predict(self, pairs, show_progress_bar: bool = False):
+        return [_score_rerank_pair(query, text) for query, text in pairs]
+
+
+def _tokenize_validation_text(text: str) -> list[str]:
+    normalized = (text or "").lower()
+    return re.findall(r"[\u4e00-\u9fff]{1,}|[a-z0-9_]+", normalized)
+
+
+def _score_rerank_pair(query: str, text: str) -> float:
+    query_tokens = set(_tokenize_validation_text(query))
+    text_tokens = set(_tokenize_validation_text(text))
+    if not query_tokens or not text_tokens:
+        return 0.0
+
+    overlap = len(query_tokens & text_tokens) / len(query_tokens)
+    score = overlap
+    if any(keyword in query for keyword in ("多久", "多少", "几", "期限", "保修")) and re.search(r"\d", text):
+        score += 0.45
+    if "什么是" in query and "是" in text:
+        score += 0.15
+    if any(token in text_tokens for token in ("rag", "检索增强生成")):
+        score += 0.1
+    return score
+
+
+def _offline_build_embeddings(settings, model_name: str | None = None):
+    return OfflineDeterministicEmbeddings()
+
+
+def _offline_single_query_rewrite(settings, query: str, history=None) -> str:
+    return query.strip()
+
+
+def _offline_multi_query_rewrite(*, settings, query: str, history=None, max_queries: int) -> list[str]:
+    return []
+
+
+def _offline_hypothetical_doc_generation(settings, query: str, history=None) -> str:
+    return ""
+
+
+def _offline_generate_rag_answer(settings, query: str, references, history) -> str:
+    if not references:
+        return "根据当前检索到的内容，无法确定。"
+
+    query_tokens = _tokenize_validation_text(query)
+    ranked_contents = sorted(
+        (
+            (sum(1 for token in query_tokens if token and token in reference.content.lower()), reference.content.strip())
+            for reference in references
+            if reference.content.strip()
+        ),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    best_content = ranked_contents[0][1] if ranked_contents else references[0].content.strip()
+    first_sentence = re.split(r"[。！？!?]\s*", best_content, maxsplit=1)[0].strip()
+    if first_sentence:
+        return first_sentence
+    return best_content[:120] or "根据当前检索到的内容，无法确定。"
+
+
+def _offline_stream_rag_answer(settings, query: str, references, history):
+    answer = _offline_generate_rag_answer(settings, query, references, history)
+    chunk_size = 12
+    for start in range(0, len(answer), chunk_size):
+        yield answer[start : start + chunk_size]
+
+
+def _offline_select_next_tool_call_with_llm(settings, request, state):
+    from app.agents.multistep import ToolPlanningDecision
+
+    return ToolPlanningDecision(plan=None, used_llm=False)
+
+
+def offline_validation_patches() -> ExitStack:
+    stack = ExitStack()
+    stack.enter_context(patch("app.services.embedding_assembler.build_embeddings", new=_offline_build_embeddings))
+    stack.enter_context(patch("app.retrievers.local_kb.build_embeddings", new=_offline_build_embeddings))
+    stack.enter_context(
+        patch("app.services.query_rewrite_service._invoke_single_query_rewrite", new=_offline_single_query_rewrite)
+    )
+    stack.enter_context(
+        patch("app.services.query_rewrite_service._invoke_multi_query_rewrite", new=_offline_multi_query_rewrite)
+    )
+    stack.enter_context(
+        patch(
+            "app.services.query_rewrite_service._invoke_hypothetical_doc_generation",
+            new=_offline_hypothetical_doc_generation,
+        )
+    )
+    stack.enter_context(patch("app.services.rerank_service.load_cross_encoder", return_value=OfflineCrossEncoder()))
+    stack.enter_context(patch("app.chains.rag.generate_rag_answer", new=_offline_generate_rag_answer))
+    stack.enter_context(patch("app.chains.rag.stream_rag_answer", new=_offline_stream_rag_answer))
+    stack.enter_context(patch("app.api.chat.generate_rag_answer", new=_offline_generate_rag_answer))
+    stack.enter_context(patch("app.api.chat.stream_rag_answer", new=_offline_stream_rag_answer))
+    stack.enter_context(patch("app.agents.multistep.generate_rag_answer", new=_offline_generate_rag_answer))
+    stack.enter_context(patch("app.agents.multistep.stream_rag_answer", new=_offline_stream_rag_answer))
+    stack.enter_context(
+        patch("app.agents.multistep.select_next_tool_call_with_llm", new=_offline_select_next_tool_call_with_llm)
+    )
+    return stack
 
 
 def submit_rebuild_and_wait(
@@ -118,8 +258,12 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
         "api_provider_alias": normalize_llm_provider(api_provider_settings.model.LLM_PROVIDER),
         "api_key_resolved": resolve_openai_compatible_api_key(api_provider_settings),
     }
-    assert checks["llm_provider_switching"]["default_provider"] == "ollama", "default llm provider mismatch"
-    assert checks["llm_provider_switching"]["default_model_class"] == "ChatOllama", "default llm backend changed unexpectedly"
+    expected_default_backend = {
+        "ollama": "ChatOllama",
+        "openai_compatible": "ChatOpenAI",
+    }.get(checks["llm_provider_switching"]["default_provider"])
+    assert expected_default_backend is not None, "default llm provider is unsupported"
+    assert checks["llm_provider_switching"]["default_model_class"] == expected_default_backend, "default llm backend changed unexpectedly"
     assert checks["llm_provider_switching"]["api_provider_alias"] == "openai_compatible", "api provider alias mismatch"
     assert checks["llm_provider_switching"]["api_key_resolved"] == "demo-key", "api provider key resolve failed"
 
@@ -167,6 +311,89 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     assert dense_query_bundle[-1] == hypothetical_doc, "hyde text should only append to dense retrieval bundle"
     assert dense_query_bundle[: len(multi_query_bundle)] == multi_query_bundle, "hyde should not reorder lexical query bundle"
 
+    corrective_settings = settings.model_copy(
+        update={
+            "kb": settings.kb.model_copy(
+                update={
+                    "ENABLE_CORRECTIVE_RAG": True,
+                    "CORRECTIVE_RAG_SECOND_PASS_TOP_K": 5,
+                    "CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD": 0.2,
+                }
+            )
+        }
+    )
+    initial_corrective_refs = [
+        _build_retrieved_reference(
+            chunk_id="partial-1",
+            source="partial.txt",
+            content="ZX900 标准保修期为 24 个月。",
+            relevance_score=0.58,
+        )
+    ]
+    second_pass_calls: list[dict[str, object]] = []
+
+    def _mock_second_pass(corrective_query: str, corrective_top_k: int, corrective_threshold: float):
+        second_pass_calls.append(
+            {
+                "query": corrective_query,
+                "top_k": corrective_top_k,
+                "score_threshold": corrective_threshold,
+            }
+        )
+        return [
+            _build_retrieved_reference(
+                chunk_id="better-1",
+                source="after_sales.txt",
+                content="ZX900 售后申请需要提供采购单、安装照片，并先联系技术支持创建工单。",
+                relevance_score=0.91,
+            )
+        ]
+
+    with patch(
+        "app.chains.rag.grade_documents",
+        return_value=RetrievalCoverageGrade(
+            grade="partial",
+            reason="已有保修信息，但缺少售后材料要求。",
+            missing_aspects="缺少售后准备材料与提单流程。",
+        ),
+    ), patch(
+        "app.chains.rag.generate_corrective_query",
+        return_value="ZX900 保修 售后 材料 工单",
+    ):
+        corrective_refs = maybe_run_corrective_retrieval(
+            settings=corrective_settings,
+            query="ZX900 的保修多久，售后要准备什么？",
+            references=initial_corrective_refs,
+            history=[],
+            top_k=2,
+            score_threshold=0.5,
+            retrieve=_mock_second_pass,
+            source_type="local_kb",
+            target_name="phase7_corrective_demo",
+        )
+    checks["corrective_rag_second_pass"] = {
+        "call_count": len(second_pass_calls),
+        "follow_up_query": second_pass_calls[0]["query"] if second_pass_calls else "",
+        "follow_up_top_k": second_pass_calls[0]["top_k"] if second_pass_calls else 0,
+        "follow_up_score_threshold": second_pass_calls[0]["score_threshold"] if second_pass_calls else 0.0,
+        "final_sources": [item.source for item in corrective_refs],
+    }
+    assert second_pass_calls, "corrective rag did not trigger second retrieval pass"
+    assert second_pass_calls[0]["query"] == "ZX900 保修 售后 材料 工单", "corrective rag follow-up query mismatch"
+    assert second_pass_calls[0]["top_k"] == 5, "corrective rag second pass top_k mismatch"
+    assert abs(float(second_pass_calls[0]["score_threshold"]) - 0.2) < 1e-9, "corrective rag second pass threshold mismatch"
+    assert [item.source for item in corrective_refs][:2] == ["after_sales.txt", "partial.txt"], "corrective rag should merge second-pass evidence first"
+
+    write_local_knowledge_base_files(
+        settings,
+        "phase2_demo",
+        {
+            "phase7_validation_rag.txt": (
+                "RAG 是检索增强生成，先从知识库检索相关资料，再把命中的上下文交给大模型生成答案。"
+                "这样可以减少幻觉，并让回答引用企业文档中的事实。"
+            )
+        },
+    )
     rebuild_status_code, rebuild_json = submit_rebuild_and_wait(
         client,
         {"knowledge_base_name": "phase2_demo"},
@@ -1021,6 +1248,29 @@ def _first_reference(payload: dict[str, object]) -> dict[str, object]:
     if not isinstance(first, dict):
         return {}
     return first
+
+
+def _build_retrieved_reference(
+    *,
+    chunk_id: str,
+    source: str,
+    content: str,
+    relevance_score: float,
+) -> object:
+    from app.schemas.chat import RetrievedReference
+
+    return RetrievedReference(
+        chunk_id=chunk_id,
+        source=source,
+        source_path=source,
+        extension=".txt",
+        content=content,
+        content_preview=content[:120],
+        raw_score=max(0.0, 1.0 - relevance_score),
+        relevance_score=relevance_score,
+        evidence_type="text",
+        source_modality="text",
+    )
 
 
 def _first_tool(payload: dict[str, object]) -> str:

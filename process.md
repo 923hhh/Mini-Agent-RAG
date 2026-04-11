@@ -366,3 +366,67 @@
 ### 当前状态
 - `T5` 已完成到可用版本。
 - 词法检索现在具备“构建期持久化、检索期直接加载、依赖缺失自动回退”的完整链路。
+
+## 2026-04-11 T4 Corrective RAG
+
+### 目标
+- 在 `/chat/rag` 主链路中引入“检索结果分级 -> 触发二次检索 -> 再生成答案”的控制环。
+- 优先用 LLM 对当前证据覆盖度做分级，失败时自动回退到启发式分级，避免新增链路把现有 RAG 整体打断。
+- 保持实现范围聚焦在本地知识库二次检索，不在这一版接入网络补搜。
+
+### 实施内容
+- 更新 `app/chains/rag.py`：
+  - 新增：
+    - `RetrievalCoverageGrade`
+    - `grade_documents()`
+    - `generate_corrective_query()`
+    - `maybe_run_corrective_retrieval()`
+    - `merge_corrective_references()`
+    - `append_corrective_trace()`
+  - 新增两类 prompt：
+    - 检索证据覆盖度分级 prompt
+    - 二次检索 query 生成 prompt
+  - 分级标签固定为：
+    - `relevant`
+    - `partial`
+    - `insufficient`
+  - 控制环策略改为：
+    - 首轮检索后先分级
+    - 若为空、`partial` 或 `insufficient`，则生成二次检索 query
+    - 第二轮检索扩大 `top_k`、降低 `score_threshold`
+    - 将两轮结果按 `relevance_score` 去重合并后再进入答案生成
+  - 新增 `corrective_rag_trace.jsonl`，记录是否触发、follow-up query、两轮命中数量等信息
+- 更新 `app/api/chat.py`：
+  - `/chat/rag` 在 local / temp 两种 source_type 下都接入 Corrective RAG 控制环
+- 更新 `app/retrievers/local_kb.py`：
+  - 新增：
+    - `search_local_knowledge_base_second_pass()`
+    - `search_temp_knowledge_base_second_pass()`
+  - 作为二次检索入口供 `rag.py` 调用
+- 更新配置：
+  - `app/services/settings.py`
+  - `configs/kb_settings.yaml`
+  - 新增：
+    - `ENABLE_CORRECTIVE_RAG`
+    - `CORRECTIVE_RAG_SECOND_PASS_TOP_K`
+    - `CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD`
+    - `CORRECTIVE_RAG_MAX_REFERENCES_TO_GRADE`
+- 更新 `scripts/validate_phase7.py`：
+  - 新增 `corrective_rag_second_pass` 离线 mock 校验
+
+### 验证结果
+- 相关文件已通过内存编译检查：
+  - `app/chains/rag.py`
+  - `app/api/chat.py`
+  - `app/retrievers/local_kb.py`
+  - `app/services/settings.py`
+  - `scripts/validate_phase7.py`
+- 离线 smoke test 验证通过：
+  - 当分级结果为 `partial` 时，会触发二次检索
+  - 二次检索会使用 follow-up query，并按配置放大 `top_k`、降低阈值
+  - 两轮检索结果会按相关度去重合并，新增证据优先排前
+- 当前未跑真实联网 /chat/rag 端到端验证，也未实测 LLM 对分级 prompt 的线上表现。
+
+### 当前状态
+- `T4` 已完成到可用版本。
+- 当前版本只做“本地知识库二次检索”控制环，文档中提到的“部分相关时补充网络搜索”仍未接入。

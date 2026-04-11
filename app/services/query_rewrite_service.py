@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from app.schemas.chat import ChatMessage
 from app.services.llm_service import build_chat_model
 from app.services.settings import AppSettings
+from app.utils.text import deduplicate_strings
 
 
 LIST_ITEM_PREFIX_PATTERN = re.compile(r"^(?:[-*]\s*|\d+[\.\)]\s*|[一二三四五六七八九十]+[、.]\s*)")
@@ -284,15 +285,13 @@ def deduplicate_query_candidates(
     *,
     limit: int,
 ) -> list[str]:
-    queries = [original_query]
+    normalized_original = normalize_candidate_query(original_query, original_query) or original_query.strip()
+    queries = [normalized_original]
     for item in candidates:
         normalized = normalize_candidate_query(item, original_query)
-        if not normalized or normalized in queries:
-            continue
-        queries.append(normalized)
-        if len(queries) >= limit:
-            break
-    return queries
+        if normalized:
+            queries.append(normalized)
+    return deduplicate_strings(queries)[:limit]
 
 
 def sanitize_hypothetical_doc(text: str) -> str:

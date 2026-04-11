@@ -38,6 +38,7 @@ class KBSettings(BaseModel):
     ENABLE_MULTI_QUERY_RETRIEVAL: bool = True
     ENABLE_HYDE: bool = False
     ENABLE_HYBRID_RETRIEVAL: bool = True
+    ENABLE_CORRECTIVE_RAG: bool = False
     ENABLE_HEURISTIC_RERANK: bool = True
     ENABLE_MODEL_RERANK: bool = False
     ENABLE_INCREMENTAL_REBUILD: bool = True
@@ -53,6 +54,9 @@ class KBSettings(BaseModel):
     HYBRID_DENSE_SCORE_WEIGHT: float = Field(default=0.35, ge=0.0, le=2.0)
     HYBRID_LEXICAL_SCORE_WEIGHT: float = Field(default=0.25, ge=0.0, le=2.0)
     MULTI_QUERY_MAX_QUERIES: int = Field(default=3, ge=1, le=6)
+    CORRECTIVE_RAG_SECOND_PASS_TOP_K: int = Field(default=6, ge=1, le=20)
+    CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD: float = Field(default=0.25, ge=0.0, le=1.0)
+    CORRECTIVE_RAG_MAX_REFERENCES_TO_GRADE: int = Field(default=4, ge=1, le=8)
     RERANK_CANDIDATES_TOP_N: int = Field(default=12, ge=1, le=50)
     RERANK_SCORE_THRESHOLD: float = Field(default=0.0, ge=0.0, le=1.0)
     RERANK_FALLBACK_TO_HEURISTIC: bool = True

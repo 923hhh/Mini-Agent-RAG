@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import json
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -10,6 +12,7 @@ from app.constants import IMAGE_QUERY_HINTS
 from app.schemas.chat import ChatMessage, RetrievedReference
 from app.services.llm_service import build_chat_model
 from app.services.observability import append_jsonl_trace
+from app.services.query_rewrite_service import format_history, sanitize_rewritten_query
 from app.services.settings import AppSettings
 from app.services.streaming_llm import stream_prompt_output
 
@@ -29,6 +32,49 @@ IMAGE_RAG_SYSTEM_PROMPT = """你是一个基于本地知识库的多模态问答
 3. 如果 OCR 证据和视觉描述证据冲突，必须明确指出冲突，不要强行合并。
 4. 如果图片证据不足，请明确说明“根据当前检索到的图片相关证据，无法确定”，不要拿普通正文内容替代图片结论。
 5. 回答尽量简洁，先说可确认内容，再说可能推断。"""
+
+CORRECTIVE_RAG_GRADE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是 RAG 检索质量评估器。"
+            "你需要判断当前检索证据是否足以回答用户问题。"
+            "只允许输出 JSON，不要输出额外解释。"
+            'JSON schema: {"grade":"relevant|partial|insufficient","reason":"<=60字","missing_aspects":"<=60字"}。',
+        ),
+        (
+            "human",
+            "对话历史：\n{history_text}\n\n用户问题：\n{query}\n\n当前证据摘要：\n{reference_summary}\n\n"
+            "请评估当前证据覆盖度。",
+        ),
+    ]
+)
+
+CORRECTIVE_RAG_QUERY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是 RAG 的二次检索查询生成器。"
+            "请基于原问题和当前证据缺口，输出一条更适合第二轮检索的短查询。"
+            "必须保留型号、参数、专有名词和关键约束。"
+            "不要回答问题，不要解释，只输出一行查询。",
+        ),
+        (
+            "human",
+            "对话历史：\n{history_text}\n\n用户问题：\n{query}\n\n"
+            "当前分级：{grade}\n原因：{reason}\n缺失点：{missing_aspects}\n\n"
+            "当前证据摘要：\n{reference_summary}\n\n"
+            "请输出一条更适合二次检索的查询：",
+        ),
+    ]
+)
+
+
+@dataclass(frozen=True)
+class RetrievalCoverageGrade:
+    grade: str
+    reason: str
+    missing_aspects: str = ""
 
 def generate_rag_answer(
     settings: AppSettings,
@@ -72,6 +118,97 @@ def stream_rag_answer(
         prompt_kind=prompt_kind,
         answer="".join(answer_parts),
     )
+
+
+def maybe_run_corrective_retrieval(
+    *,
+    settings: AppSettings,
+    query: str,
+    references: list[RetrievedReference],
+    history: list[ChatMessage],
+    top_k: int,
+    score_threshold: float,
+    retrieve: Callable[[str, int, float], list[RetrievedReference]],
+    source_type: str,
+    target_name: str,
+) -> list[RetrievedReference]:
+    if not settings.kb.ENABLE_CORRECTIVE_RAG:
+        return references
+
+    initial_grade = grade_documents(
+        settings=settings,
+        query=query,
+        references=references,
+        history=history,
+    )
+    should_retry = not references or initial_grade.grade in {"partial", "insufficient"}
+    if not should_retry:
+        append_corrective_trace(
+            settings=settings,
+            query=query,
+            source_type=source_type,
+            target_name=target_name,
+            initial_reference_count=len(references),
+            initial_grade=initial_grade,
+            triggered=False,
+            follow_up_query="",
+            follow_up_reference_count=0,
+            final_references=references,
+        )
+        return references
+
+    follow_up_query = generate_corrective_query(
+        settings=settings,
+        query=query,
+        references=references,
+        history=history,
+        grade=initial_grade,
+    )
+    second_pass_top_k = min(
+        20,
+        max(top_k + 2, settings.kb.CORRECTIVE_RAG_SECOND_PASS_TOP_K),
+    )
+    second_pass_threshold = min(score_threshold, settings.kb.CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD)
+    try:
+        follow_up_references = retrieve(
+            follow_up_query,
+            second_pass_top_k,
+            second_pass_threshold,
+        )
+    except Exception as exc:
+        append_corrective_trace(
+            settings=settings,
+            query=query,
+            source_type=source_type,
+            target_name=target_name,
+            initial_reference_count=len(references),
+            initial_grade=initial_grade,
+            triggered=True,
+            follow_up_query=follow_up_query,
+            follow_up_reference_count=0,
+            final_references=references,
+            error_message=str(exc),
+        )
+        return references
+
+    final_references = merge_corrective_references(
+        references,
+        follow_up_references,
+        limit=second_pass_top_k,
+    )
+    append_corrective_trace(
+        settings=settings,
+        query=query,
+        source_type=source_type,
+        target_name=target_name,
+        initial_reference_count=len(references),
+        initial_grade=initial_grade,
+        triggered=True,
+        follow_up_query=follow_up_query,
+        follow_up_reference_count=len(follow_up_references),
+        final_references=final_references,
+    )
+    return final_references
 
 
 def build_rag_prompt(
@@ -178,6 +315,187 @@ def build_context(references: list[RetrievedReference]) -> str:
     return "\n\n".join(sections)
 
 
+def grade_documents(
+    *,
+    settings: AppSettings,
+    query: str,
+    references: list[RetrievedReference],
+    history: list[ChatMessage],
+) -> RetrievalCoverageGrade:
+    heuristic = heuristic_grade_documents(references)
+    if not references:
+        return heuristic
+
+    parsed = invoke_corrective_grade_llm(
+        settings=settings,
+        query=query,
+        references=references[: settings.kb.CORRECTIVE_RAG_MAX_REFERENCES_TO_GRADE],
+        history=history,
+    )
+    if parsed is None:
+        return heuristic
+    return parsed
+
+
+def heuristic_grade_documents(
+    references: list[RetrievedReference],
+) -> RetrievalCoverageGrade:
+    if not references:
+        return RetrievalCoverageGrade(
+            grade="insufficient",
+            reason="当前未检索到相关证据。",
+            missing_aspects="缺少可回答问题的上下文。",
+        )
+
+    relevance_scores = [max(0.0, float(item.relevance_score)) for item in references]
+    max_relevance = max(relevance_scores, default=0.0)
+    average_relevance = sum(relevance_scores) / max(1, len(relevance_scores))
+    if len(references) >= 2 and max_relevance >= 0.78 and average_relevance >= 0.62:
+        return RetrievalCoverageGrade(
+            grade="relevant",
+            reason="当前证据覆盖度较高。",
+            missing_aspects="",
+        )
+    if max_relevance >= 0.55 or average_relevance >= 0.42:
+        return RetrievalCoverageGrade(
+            grade="partial",
+            reason="已有部分相关证据，但覆盖不完整。",
+            missing_aspects="可能缺少关键条件或补充细节。",
+        )
+    return RetrievalCoverageGrade(
+        grade="insufficient",
+        reason="当前证据相关性偏弱。",
+        missing_aspects="需要更聚焦的检索结果。",
+    )
+
+
+def invoke_corrective_grade_llm(
+    *,
+    settings: AppSettings,
+    query: str,
+    references: list[RetrievedReference],
+    history: list[ChatMessage],
+) -> RetrievalCoverageGrade | None:
+    model_name = settings.model.QUERY_REWRITE_MODEL.strip() or settings.model.DEFAULT_LLM_MODEL
+    try:
+        llm = build_chat_model(settings, model_name=model_name, temperature=0.0)
+        chain = CORRECTIVE_RAG_GRADE_PROMPT | llm | StrOutputParser()
+        raw_output = chain.invoke(
+            {
+                "query": query.strip(),
+                "history_text": format_history(history),
+                "reference_summary": summarize_references_for_grading(references),
+            }
+        )
+    except Exception:
+        return None
+
+    payload = extract_json_payload(raw_output)
+    if not isinstance(payload, dict):
+        return None
+    grade = str(payload.get("grade", "")).strip().lower()
+    if grade not in {"relevant", "partial", "insufficient"}:
+        return None
+    reason = str(payload.get("reason", "")).strip() or "模型未提供理由。"
+    missing_aspects = str(payload.get("missing_aspects", "")).strip()
+    return RetrievalCoverageGrade(
+        grade=grade,
+        reason=reason[:120],
+        missing_aspects=missing_aspects[:120],
+    )
+
+
+def generate_corrective_query(
+    *,
+    settings: AppSettings,
+    query: str,
+    references: list[RetrievedReference],
+    history: list[ChatMessage],
+    grade: RetrievalCoverageGrade,
+) -> str:
+    model_name = settings.model.QUERY_REWRITE_MODEL.strip() or settings.model.DEFAULT_LLM_MODEL
+    try:
+        llm = build_chat_model(settings, model_name=model_name, temperature=0.0)
+        chain = CORRECTIVE_RAG_QUERY_PROMPT | llm | StrOutputParser()
+        raw_output = chain.invoke(
+            {
+                "query": query.strip(),
+                "history_text": format_history(history),
+                "grade": grade.grade,
+                "reason": grade.reason,
+                "missing_aspects": grade.missing_aspects or "未明确指出。",
+                "reference_summary": summarize_references_for_grading(
+                    references[: settings.kb.CORRECTIVE_RAG_MAX_REFERENCES_TO_GRADE]
+                ),
+            }
+        )
+    except Exception:
+        return query.strip()
+
+    cleaned = sanitize_rewritten_query(raw_output)
+    if not cleaned:
+        return query.strip()
+    if len(cleaned) > max(128, len(query.strip()) * 2):
+        return query.strip()
+    return cleaned
+
+
+def summarize_references_for_grading(
+    references: list[RetrievedReference],
+) -> str:
+    if not references:
+        return "无可用证据。"
+
+    lines: list[str] = []
+    for index, ref in enumerate(references, start=1):
+        summary_parts = [f"[{index}] source={ref.source}"]
+        if ref.section_title:
+            summary_parts.append(f"section={ref.section_title}")
+        summary_parts.append(f"relevance={ref.relevance_score:.3f}")
+        preview = (ref.evidence_summary or ref.content_preview or ref.content).replace("\n", " ").strip()
+        lines.append(" | ".join(summary_parts) + f" | preview={preview[:180]}")
+    return "\n".join(lines)
+
+
+def extract_json_payload(text: str) -> dict[str, object] | None:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("```"):
+        lines = [line for line in cleaned.splitlines() if not line.startswith("```")]
+        cleaned = "\n".join(lines).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def merge_corrective_references(
+    initial: list[RetrievedReference],
+    follow_up: list[RetrievedReference],
+    *,
+    limit: int,
+) -> list[RetrievedReference]:
+    best_by_chunk_id: dict[str, RetrievedReference] = {}
+    for item in [*initial, *follow_up]:
+        existing = best_by_chunk_id.get(item.chunk_id)
+        if existing is None or item.relevance_score > existing.relevance_score:
+            best_by_chunk_id[item.chunk_id] = item
+    ranked = sorted(
+        best_by_chunk_id.values(),
+        key=lambda item: item.relevance_score,
+        reverse=True,
+    )
+    return ranked[:limit]
+
+
 def resolve_reference_context_group(ref: RetrievedReference) -> str:
     source_modality = (ref.source_modality or "").strip().lower()
     if source_modality == "ocr":
@@ -249,6 +567,42 @@ def append_answer_trace(
             "has_joint_text_image_evidence": has_text_context and has_image_context,
             "has_multimodal_context": len([key for key, value in context_groups.items() if value > 0]) >= 2,
             "answer_preview": answer[:240],
+        },
+    )
+
+
+def append_corrective_trace(
+    *,
+    settings: AppSettings,
+    query: str,
+    source_type: str,
+    target_name: str,
+    initial_reference_count: int,
+    initial_grade: RetrievalCoverageGrade,
+    triggered: bool,
+    follow_up_query: str,
+    follow_up_reference_count: int,
+    final_references: list[RetrievedReference],
+    error_message: str = "",
+) -> None:
+    append_jsonl_trace(
+        settings,
+        "corrective_rag_trace",
+        {
+            "event_type": "corrective_rag",
+            "query": query,
+            "source_type": source_type,
+            "target_name": target_name,
+            "initial_reference_count": initial_reference_count,
+            "initial_grade": initial_grade.grade,
+            "grade_reason": initial_grade.reason,
+            "missing_aspects": initial_grade.missing_aspects,
+            "triggered": triggered,
+            "follow_up_query": follow_up_query,
+            "follow_up_reference_count": follow_up_reference_count,
+            "final_reference_count": len(final_references),
+            "final_sources": [item.source for item in final_references[:6]],
+            "error_message": error_message,
         },
     )
 

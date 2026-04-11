@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from math import log
 from pathlib import Path
+import re
 
 from langchain_core.documents import Document
 
@@ -94,6 +95,26 @@ def search_local_knowledge_base(
     )
 
 
+def search_local_knowledge_base_second_pass(
+    settings: AppSettings,
+    knowledge_base_name: str,
+    query: str,
+    top_k: int,
+    score_threshold: float,
+    history: list[ChatMessage] | None = None,
+    metadata_filters: MetadataFilters | None = None,
+) -> list[RetrievedReference]:
+    return search_local_knowledge_base(
+        settings=settings,
+        knowledge_base_name=knowledge_base_name,
+        query=query,
+        top_k=top_k,
+        score_threshold=score_threshold,
+        history=history,
+        metadata_filters=metadata_filters,
+    )
+
+
 def search_temp_knowledge_base(
     settings: AppSettings,
     knowledge_id: str,
@@ -112,6 +133,26 @@ def search_temp_knowledge_base(
         top_k=top_k,
         score_threshold=score_threshold,
         not_found_hint="请先通过 /knowledge_base/upload 上传临时文件。",
+        history=history,
+        metadata_filters=metadata_filters,
+    )
+
+
+def search_temp_knowledge_base_second_pass(
+    settings: AppSettings,
+    knowledge_id: str,
+    query: str,
+    top_k: int,
+    score_threshold: float,
+    history: list[ChatMessage] | None = None,
+    metadata_filters: MetadataFilters | None = None,
+) -> list[RetrievedReference]:
+    return search_temp_knowledge_base(
+        settings=settings,
+        knowledge_id=knowledge_id,
+        query=query,
+        top_k=top_k,
+        score_threshold=score_threshold,
         history=history,
         metadata_filters=metadata_filters,
     )
