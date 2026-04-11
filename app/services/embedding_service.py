@@ -11,7 +11,9 @@ from app.services.llm_service import (
 
 
 def build_embeddings(settings: AppSettings, model_name: str | None = None) -> Any:
-    provider = normalize_llm_provider(settings.model.LLM_PROVIDER)
+    # EMBEDDING_PROVIDER 优先；留空则跟随 LLM_PROVIDER
+    raw_provider = (settings.model.EMBEDDING_PROVIDER or settings.model.LLM_PROVIDER).strip()
+    provider = normalize_llm_provider(raw_provider)
     resolved_model_name = model_name or settings.model.DEFAULT_EMBEDDING_MODEL
 
     if provider == "ollama":
@@ -50,7 +52,7 @@ def build_embeddings(settings: AppSettings, model_name: str | None = None) -> An
             max_retries=settings.model.OPENAI_COMPATIBLE_MAX_RETRIES,
         )
 
-    raise ValueError(f"不支持的 Embedding provider: {settings.model.LLM_PROVIDER}")
+    raise ValueError(f"不支持的 Embedding provider: {raw_provider}")
 
 
 def embed_texts_batched(

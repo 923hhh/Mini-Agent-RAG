@@ -48,9 +48,10 @@ data/external/
 data/models/
 data/huggingface/
 data/tools/
-data/tmp/
+data/temp/
+data/_validate_tmp
 data/*.json
-data/*.txt
+data/*.txt 
 data/*.csv
 !data/.gitkeep
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.storage.filters import MetadataFilters
 
@@ -115,10 +115,20 @@ class ToolDefinition(BaseModel):
     parameters: dict[str, Any]
 
 
+class MemoryOverview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    semantic_hits: int = 0
+    episode_hits: int = 0
+    turn_hits: int = 0
+    used_memory: bool = False
+
+
 class AgentChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1)
+    session_id: str | None = None
     knowledge_base_name: str = ""
     top_k: int = Field(default=4, ge=1, le=20)
     score_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -127,6 +137,15 @@ class AgentChatRequest(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     max_steps: int = Field(default=4, ge=1, le=8)
     stream: bool = False
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def normalize_session_id(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class AgentChatResponse(BaseModel):
@@ -140,3 +159,5 @@ class AgentChatResponse(BaseModel):
     knowledge_base_name: str
     used_tools: bool
     stream: bool
+    session_id: str | None = None
+    memory_overview: MemoryOverview | None = None

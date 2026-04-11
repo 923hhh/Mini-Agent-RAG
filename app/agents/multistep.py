@@ -15,10 +15,17 @@ from app.schemas.chat import (
     AgentChatRequest,
     AgentChatResponse,
     AgentStepRecord,
+    MemoryOverview,
     RetrievedReference,
     ToolCallRecord,
 )
 from app.services.llm_service import build_chat_model
+from app.services.memory_service import (
+    agent_memory_enabled,
+    persist_agent_turns,
+    retrieve_agent_memory,
+    sanitize_session_id,
+)
 from app.services.reference_overview import build_reference_overview
 from app.services.settings import AppSettings
 from app.services.streaming_llm import stream_prompt_output
@@ -134,9 +141,40 @@ def run_agent(
     request: AgentChatRequest,
 ) -> AgentChatResponse:
     validate_agent_request(request)
-    state = execute_agent_plan(settings=settings, request=request)
-    answer = build_agent_answer(settings=settings, request=request, state=state)
+    session_id = sanitize_session_id(request.session_id)
+    memory_context = ""
+    memory_overview: MemoryOverview | None = None
+    if session_id and agent_memory_enabled(settings):
+        bundle = retrieve_agent_memory(
+            settings,
+            session_id=session_id,
+            query=request.query,
+        )
+        memory_context = bundle.text
+        memory_overview = bundle.overview
+
+    state = execute_agent_plan(
+        settings=settings,
+        request=request,
+        memory_context=memory_context,
+    )
+    answer = build_agent_answer(
+        settings=settings,
+        request=request,
+        state=state,
+        memory_context=memory_context,
+    )
     append_final_step(state, answer)
+    if session_id and agent_memory_enabled(settings):
+        persist_agent_turns(
+            settings,
+            session_id=session_id,
+            user_text=request.query,
+            assistant_text=answer,
+            tools_used=[
+                item.tool_name for item in state.tool_calls if item.status == "success"
+            ],
+        )
     return AgentChatResponse(
         answer=answer,
         tool_calls=state.tool_calls,
@@ -146,6 +184,8 @@ def run_agent(
         knowledge_base_name=request.knowledge_base_name,
         used_tools=bool(state.tool_calls),
         stream=request.stream,
+        session_id=session_id,
+        memory_overview=memory_overview,
     )
 
 
@@ -154,20 +194,51 @@ def stream_agent_events(
     request: AgentChatRequest,
 ) -> Iterator[dict[str, Any]]:
     validate_agent_request(request)
+    session_id = sanitize_session_id(request.session_id)
+    memory_context = ""
+    memory_overview: MemoryOverview | None = None
+    if session_id and agent_memory_enabled(settings):
+        bundle = retrieve_agent_memory(
+            settings,
+            session_id=session_id,
+            query=request.query,
+        )
+        memory_context = bundle.text
+        memory_overview = bundle.overview
+
     emitted_events: list[dict[str, Any]] = []
-    state = execute_agent_plan(settings=settings, request=request, emit=emitted_events.append)
+    state = execute_agent_plan(
+        settings=settings,
+        request=request,
+        emit=emitted_events.append,
+        memory_context=memory_context,
+    )
     for payload in emitted_events:
         yield payload
 
     answer_parts: list[str] = []
-    for delta in stream_agent_answer(settings=settings, request=request, state=state):
+    for delta in stream_agent_answer(
+        settings=settings,
+        request=request,
+        state=state,
+        memory_context=memory_context,
+    ):
         answer_parts.append(delta)
         yield {"type": "token", "delta": delta}
 
     answer = "".join(answer_parts)
     append_final_step(state, answer)
-    yield {
-        "type": "done",
+    if session_id and agent_memory_enabled(settings):
+        persist_agent_turns(
+            settings,
+            session_id=session_id,
+            user_text=request.query,
+            assistant_text=answer,
+            tools_used=[
+                item.tool_name for item in state.tool_calls if item.status == "success"
+            ],
+        )
+    done_body: dict[str, Any] = {
         "answer": answer,
         "tool_calls": [item.model_dump() for item in state.tool_calls],
         "steps": [item.model_dump() for item in state.steps],
@@ -176,18 +247,23 @@ def stream_agent_events(
         "knowledge_base_name": request.knowledge_base_name,
         "used_tools": bool(state.tool_calls),
         "stream": True,
+        "session_id": session_id,
     }
+    if memory_overview is not None:
+        done_body["memory_overview"] = memory_overview.model_dump()
+    yield {"type": "done", **done_body}
 
 
 def execute_agent_plan(
     settings: AppSettings,
     request: AgentChatRequest,
     emit: Callable[[dict[str, Any]], None] | None = None,
+    memory_context: str = "",
 ) -> AgentExecutionState:
     state = AgentExecutionState()
 
     for step_index in range(1, request.max_steps + 1):
-        plan = select_next_tool_call(settings, request, state)
+        plan = select_next_tool_call(settings, request, state, memory_context=memory_context)
         if plan is None:
             break
 
@@ -265,7 +341,7 @@ def execute_agent_plan(
             return state
 
     if len(state.tool_calls) >= request.max_steps:
-        next_plan = select_next_tool_call(settings, request, state)
+        next_plan = select_next_tool_call(settings, request, state, memory_context=memory_context)
         if next_plan is not None:
             stop_step = AgentStepRecord(
                 step_index=request.max_steps + 1,
@@ -286,8 +362,12 @@ def select_next_tool_call(
     settings: AppSettings,
     request: AgentChatRequest,
     state: AgentExecutionState,
+    *,
+    memory_context: str = "",
 ) -> PlannedToolCall | None:
-    planning = select_next_tool_call_with_llm(settings, request, state)
+    planning = select_next_tool_call_with_llm(
+        settings, request, state, memory_context=memory_context
+    )
     if planning.used_llm and planning.plan is not None:
         return planning.plan
     return select_next_tool_call_heuristic(request, state)
@@ -348,6 +428,8 @@ def select_next_tool_call_with_llm(
     settings: AppSettings,
     request: AgentChatRequest,
     state: AgentExecutionState,
+    *,
+    memory_context: str = "",
 ) -> ToolPlanningDecision:
     allowed = resolve_allowed_tools(request)
     plannable_tools = resolve_plannable_tools(request, allowed)
@@ -369,6 +451,7 @@ def select_next_tool_call_with_llm(
             request=request,
             state=state,
             plannable_tools=plannable_tools,
+            memory_context=memory_context,
         )
         response = bind_tools(plannable_tools, tool_choice="auto").invoke(prompt.invoke(variables))
     except Exception:
@@ -413,6 +496,7 @@ def build_agent_tool_planning_prompt() -> ChatPromptTemplate:
             MessagesPlaceholder("history"),
             (
                 "human",
+                "长期记忆摘要（可能为空）：\n{memory_context}\n\n"
                 "用户问题：\n{query}\n\n"
                 "knowledge_base_name：{knowledge_base_name}\n\n"
                 "可用工具：\n{available_tools}\n\n"
@@ -430,9 +514,12 @@ def build_agent_tool_planning_variables(
     request: AgentChatRequest,
     state: AgentExecutionState,
     plannable_tools: list[dict[str, Any]],
+    memory_context: str = "",
 ) -> dict[str, object]:
+    memory_block = memory_context.strip() if memory_context.strip() else "（无）"
     return {
         "history": convert_history(request.history),
+        "memory_context": memory_block,
         "query": request.query,
         "knowledge_base_name": request.knowledge_base_name.strip() or "（未提供）",
         "available_tools": format_available_tools_for_planning(plannable_tools),
@@ -543,6 +630,9 @@ def resolve_allowed_tools(request: AgentChatRequest) -> set[str]:
 
 
 def validate_agent_request(request: AgentChatRequest) -> None:
+    if request.session_id is not None:
+        sanitize_session_id(request.session_id)
+
     available = tool_names()
     if not request.allowed_tools:
         return
@@ -558,9 +648,11 @@ def build_agent_answer(
     settings: AppSettings,
     request: AgentChatRequest,
     state: AgentExecutionState,
+    *,
+    memory_context: str = "",
 ) -> str:
     if not state.tool_calls:
-        return generate_direct_answer(settings, request)
+        return generate_direct_answer(settings, request, memory_context=memory_context)
 
     failed_tool = next((item for item in state.tool_calls if item.status == "error"), None)
     if failed_tool is not None:
@@ -575,6 +667,7 @@ def build_agent_answer(
                 query=request.query,
                 references=first_result.references,
                 history=request.history,
+                agent_memory_context=memory_context,
             )
         else:
             answer = "我已调用 `search_local_knowledge`，但当前知识库没有检索到满足阈值的内容。"
@@ -624,9 +717,11 @@ def stream_agent_answer(
     settings: AppSettings,
     request: AgentChatRequest,
     state: AgentExecutionState,
+    *,
+    memory_context: str = "",
 ) -> Iterator[str]:
     if not state.tool_calls:
-        yield from stream_direct_answer(settings, request)
+        yield from stream_direct_answer(settings, request, memory_context=memory_context)
         return
 
     failed_tool = next((item for item in state.tool_calls if item.status == "error"), None)
@@ -640,7 +735,11 @@ def stream_agent_answer(
     if executed_names == ["search_local_knowledge"]:
         first_result = state.executed_tools[0].result
         if state.stop_reason:
-            yield from iter_text_chunks(build_agent_answer(settings, request, state))
+            yield from iter_text_chunks(
+                build_agent_answer(
+                    settings, request, state, memory_context=memory_context
+                )
+            )
             return
         if first_result.references:
             yield from stream_rag_answer(
@@ -648,16 +747,21 @@ def stream_agent_answer(
                 query=request.query,
                 references=first_result.references,
                 history=request.history,
+                agent_memory_context=memory_context,
             )
             return
         yield from iter_text_chunks("我已调用 `search_local_knowledge`，但当前知识库没有检索到满足阈值的内容。")
         return
 
     if executed_names == ["current_time"] and state.stop_reason:
-        yield from iter_text_chunks(build_agent_answer(settings, request, state))
+        yield from iter_text_chunks(
+            build_agent_answer(settings, request, state, memory_context=memory_context)
+        )
         return
 
-    yield from iter_text_chunks(build_agent_answer(settings, request, state))
+    yield from iter_text_chunks(
+        build_agent_answer(settings, request, state, memory_context=memory_context)
+    )
 
 
 def emit_tool_call(emit: Callable[[dict[str, Any]], None] | None, tool_call: ToolCallRecord) -> None:
@@ -748,10 +852,13 @@ def build_tool_step_summary(
 def generate_direct_answer(
     settings: AppSettings,
     request: AgentChatRequest,
+    *,
+    memory_context: str = "",
 ) -> str:
     prompt = build_agent_direct_prompt()
     variables = {
         "history": convert_history(request.history),
+        "memory_section": format_agent_memory_section(memory_context),
         "query": request.query,
     }
     llm = build_chat_model(
@@ -766,10 +873,13 @@ def generate_direct_answer(
 def stream_direct_answer(
     settings: AppSettings,
     request: AgentChatRequest,
+    *,
+    memory_context: str = "",
 ) -> Iterator[str]:
     prompt = build_agent_direct_prompt()
     variables = {
         "history": convert_history(request.history),
+        "memory_section": format_agent_memory_section(memory_context),
         "query": request.query,
     }
     yield from stream_prompt_output(
@@ -781,12 +891,19 @@ def stream_direct_answer(
     )
 
 
+def format_agent_memory_section(memory_context: str) -> str:
+    text = memory_context.strip()
+    if not text:
+        return ""
+    return f"【长期记忆】\n{text}\n\n"
+
+
 def build_agent_direct_prompt() -> ChatPromptTemplate:
     return ChatPromptTemplate.from_messages(
         [
             ("system", AGENT_DIRECT_SYSTEM_PROMPT),
             MessagesPlaceholder("history"),
-            ("human", "{query}"),
+            ("human", "{memory_section}{query}"),
         ]
     )
 

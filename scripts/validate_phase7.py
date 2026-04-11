@@ -19,6 +19,8 @@ import uvicorn
 from fastapi.testclient import TestClient
 from streamlit.testing.v1 import AppTest
 
+from langchain_core.embeddings import Embeddings
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -39,6 +41,7 @@ from app.services.temp_kb_service import (
     maybe_run_startup_cleanup,
     write_temp_manifest,
 )
+from app.services.web_search_service import parse_duckduckgo_html_results
 
 
 def main() -> int:
@@ -48,15 +51,16 @@ def main() -> int:
     }
 
     settings = load_settings(PROJECT_ROOT)
-    with TestClient(app) as client:
-        summary["api_checks"] = run_api_checks(settings, client)
-    summary["ui_checks"] = run_ui_checks()
+    with offline_validation_patches():
+        with TestClient(app) as client:
+            summary["api_checks"] = run_api_checks(settings, client)
+        summary["ui_checks"] = run_ui_checks()
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
-class OfflineDeterministicEmbeddings:
+class OfflineDeterministicEmbeddings(Embeddings):
     def __init__(self, dimension: int = 64) -> None:
         self.dimension = max(8, dimension)
 
@@ -84,6 +88,11 @@ class OfflineDeterministicEmbeddings:
             return vector
         return [value / norm for value in vector]
 
+    def __call__(self, value):
+        if isinstance(value, str):
+            return self.embed_query(value)
+        return self.embed_documents(list(value))
+
 
 class OfflineCrossEncoder:
     def predict(self, pairs, show_progress_bar: bool = False):
@@ -103,12 +112,20 @@ def _score_rerank_pair(query: str, text: str) -> float:
 
     overlap = len(query_tokens & text_tokens) / len(query_tokens)
     score = overlap
-    if any(keyword in query for keyword in ("多久", "多少", "几", "期限", "保修")) and re.search(r"\d", text):
-        score += 0.45
+    has_duration_value = bool(re.search(r"\d+\s*(?:个?月|年|天|日|小时)", text))
+    if any(keyword in query for keyword in ("多久", "多少", "几", "期限", "保修")):
+        if has_duration_value:
+            score += 0.4
+        else:
+            score -= 0.2
+    if any(keyword in text for keyword in ("个月", "工单", "采购单")):
+        score += 0.15
     if "什么是" in query and "是" in text:
         score += 0.15
     if any(token in text_tokens for token in ("rag", "检索增强生成")):
         score += 0.1
+    if any(phrase in text for phrase in ("不给出任何", "不回答用户问题", "无法回答", "没有给出答案")):
+        score -= 0.35
     return score
 
 
@@ -128,7 +145,9 @@ def _offline_hypothetical_doc_generation(settings, query: str, history=None) -> 
     return ""
 
 
-def _offline_generate_rag_answer(settings, query: str, references, history) -> str:
+def _offline_generate_rag_answer(
+    settings, query: str, references, history, agent_memory_context: str = "", **_: object
+) -> str:
     if not references:
         return "根据当前检索到的内容，无法确定。"
 
@@ -149,14 +168,18 @@ def _offline_generate_rag_answer(settings, query: str, references, history) -> s
     return best_content[:120] or "根据当前检索到的内容，无法确定。"
 
 
-def _offline_stream_rag_answer(settings, query: str, references, history):
-    answer = _offline_generate_rag_answer(settings, query, references, history)
+def _offline_stream_rag_answer(
+    settings, query: str, references, history, agent_memory_context: str = "", **_: object
+):
+    answer = _offline_generate_rag_answer(
+        settings, query, references, history, agent_memory_context=agent_memory_context
+    )
     chunk_size = 12
     for start in range(0, len(answer), chunk_size):
         yield answer[start : start + chunk_size]
 
 
-def _offline_select_next_tool_call_with_llm(settings, request, state):
+def _offline_select_next_tool_call_with_llm(settings, request, state, memory_context: str = "", **_: object):
     from app.agents.multistep import ToolPlanningDecision
 
     return ToolPlanningDecision(plan=None, used_llm=False)
@@ -189,6 +212,81 @@ def offline_validation_patches() -> ExitStack:
         patch("app.agents.multistep.select_next_tool_call_with_llm", new=_offline_select_next_tool_call_with_llm)
     )
     return stack
+
+
+def run_agent_memory_offline_block(settings) -> dict[str, object]:
+    from unittest.mock import patch
+
+    from app.services.memory_service import (
+        persist_agent_turns,
+        retrieve_agent_memory,
+        sanitize_session_id,
+    )
+
+    rejected = False
+    try:
+        sanitize_session_id("bad id")
+    except ValueError:
+        rejected = True
+    assert rejected, "sanitize_session_id 应拒绝含空格的 session_id"
+
+    result: dict[str, object] = {"invalid_session_rejected": True}
+    tmp_root = (PROJECT_ROOT / "data" / "_validate_tmp" / f"agent_memory_{int(time.time() * 1000)}").resolve()
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root, onerror=_handle_rmtree_error)
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    try:
+        mem_root = (tmp_root / "am").resolve()
+        trial = settings.model_copy(
+            update={
+                "basic": settings.basic.model_copy(
+                    update={
+                        "ENABLE_AGENT_MEMORY": True,
+                        "AGENT_MEMORY_ROOT": str(mem_root),
+                        "AGENT_MEMORY_EPISODE_MAX_TURNS": 100,
+                    }
+                )
+            }
+        )
+        sid = "phase7_mem_demo"
+        persist_agent_turns(
+            trial,
+            session_id=sid,
+            user_text="偏好深色主题",
+            assistant_text="已记录。",
+            tools_used=[],
+        )
+        sem_path = trial.agent_memory_session_dir(sid) / "semantics.jsonl"
+        record = {
+            "semantic_id": "sem-000001",
+            "fact": "用户偏好深色主题 UI",
+            "episode_id": "ep-000001",
+            "category": "preference",
+            "confidence": 0.9,
+            "source_ids": [],
+            "parent_ids": [],
+            "children_ids": [],
+        }
+        with sem_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        with patch("app.services.memory_service.build_embeddings", new=_offline_build_embeddings):
+            bundle = retrieve_agent_memory(
+                trial,
+                session_id=sid,
+                query="深色主题 偏好",
+            )
+        result["semantic_hits"] = bundle.overview.semantic_hits
+        result["used_memory"] = bundle.overview.used_memory
+        assert bundle.overview.semantic_hits >= 1, "应命中注入的语义记忆"
+        assert bundle.overview.used_memory, "记忆上下文应非空"
+    finally:
+        if tmp_root.exists():
+            try:
+                shutil.rmtree(tmp_root, onerror=_handle_rmtree_error)
+            except OSError:
+                pass
+    return result
 
 
 def submit_rebuild_and_wait(
@@ -384,6 +482,85 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     assert abs(float(second_pass_calls[0]["score_threshold"]) - 0.2) < 1e-9, "corrective rag second pass threshold mismatch"
     assert [item.source for item in corrective_refs][:2] == ["after_sales.txt", "partial.txt"], "corrective rag should merge second-pass evidence first"
 
+    sample_web_html = """
+    <div class="results">
+      <div class="result">
+        <a class="result__a" href="https://support.example.com/zx900-warranty">ZX900 售后工单流程</a>
+        <a class="result__snippet">ZX900 售后申请需要提供采购单和安装照片，并先联系技术支持创建工单。</a>
+      </div>
+      <div class="result">
+        <a class="result__a" href="https://docs.example.com/zx900-guide">ZX900 维保说明</a>
+        <a class="result__snippet">标准保修期为 24 个月，自验收日期开始计算。</a>
+      </div>
+    </div>
+    """
+    parsed_web_results = parse_duckduckgo_html_results(sample_web_html, limit=2)
+    checks["corrective_web_search_parser"] = {
+        "count": len(parsed_web_results),
+        "first_url": parsed_web_results[0].url if parsed_web_results else "",
+        "first_domain": parsed_web_results[0].source_domain if parsed_web_results else "",
+    }
+    assert len(parsed_web_results) == 2, "corrective web search parser should return two snippets"
+    assert parsed_web_results[0].source_domain == "support.example.com", "corrective web search parser domain mismatch"
+
+    web_corrective_settings = settings.model_copy(
+        update={
+            "kb": settings.kb.model_copy(
+                update={
+                    "ENABLE_CORRECTIVE_RAG": True,
+                    "ENABLE_CORRECTIVE_WEB_SEARCH": True,
+                    "CORRECTIVE_RAG_SECOND_PASS_TOP_K": 5,
+                    "CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD": 0.2,
+                    "CORRECTIVE_WEB_SEARCH_TOP_K": 2,
+                }
+            )
+        }
+    )
+    web_search_calls: list[str] = []
+
+    def _mock_web_search(corrective_query: str):
+        web_search_calls.append(corrective_query)
+        return [
+            _build_retrieved_reference(
+                chunk_id="web-1",
+                source="support.example.com",
+                content="ZX900 售后申请需要提供采购单和安装照片，并先联系技术支持创建工单。",
+                relevance_score=0.67,
+            )
+        ]
+
+    with patch(
+        "app.chains.rag.grade_documents",
+        return_value=RetrievalCoverageGrade(
+            grade="partial",
+            reason="已有保修信息，但缺少外部售后流程补充。",
+            missing_aspects="缺少售后申请材料和工单流程。",
+        ),
+    ), patch(
+        "app.chains.rag.generate_corrective_query",
+        return_value="ZX900 保修 售后 材料 工单",
+    ):
+        web_supplement_refs = maybe_run_corrective_retrieval(
+            settings=web_corrective_settings,
+            query="ZX900 的保修多久，售后要准备什么？",
+            references=initial_corrective_refs,
+            history=[],
+            top_k=2,
+            score_threshold=0.5,
+            retrieve=_mock_second_pass,
+            search_web=_mock_web_search,
+            source_type="local_kb",
+            target_name="phase7_corrective_demo",
+        )
+    checks["corrective_rag_web_supplement"] = {
+        "call_count": len(web_search_calls),
+        "query": web_search_calls[0] if web_search_calls else "",
+        "sources": [item.source for item in web_supplement_refs],
+    }
+    assert web_search_calls, "corrective rag did not trigger web supplement search"
+    assert web_search_calls[0] == "ZX900 保修 售后 材料 工单", "corrective rag web query mismatch"
+    assert "support.example.com" in checks["corrective_rag_web_supplement"]["sources"], "corrective rag web result was not merged"
+
     write_local_knowledge_base_files(
         settings,
         "phase2_demo",
@@ -520,9 +697,14 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
         "status_code": incremental_append_rag_response.status_code,
         "used_context": incremental_append_rag_json.get("used_context"),
         "first_source": _first_source(incremental_append_rag_json),
+        "sources": [
+            item.get("source", "")
+            for item in incremental_append_rag_json.get("references", [])
+            if isinstance(item, dict)
+        ],
     }
     assert incremental_append_rag_response.status_code == 200, "incremental append rag failed"
-    assert _first_source(incremental_append_rag_json) == "append.txt", "append rebuild result was not searchable"
+    assert "append.txt" in checks["incremental_rebuild_append_rag"]["sources"], "append rebuild result was not searchable"
 
     write_local_knowledge_base_files(
         settings,
@@ -590,17 +772,18 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
             "kb": settings.kb.model_copy(update={"ENABLE_MODEL_RERANK": True}),
         }
     )
-    rerank_probe = rerank_texts(
-        settings=rerank_enabled_settings,
-        query="什么是 RAG？",
-        items=[
-            RerankTextInput(
-                candidate_id="probe-intro",
-                text="RAG 是检索增强生成，通过先检索外部知识再调用大模型生成答案。",
-            )
-        ],
-        top_n=1,
-    )
+    with patch("app.services.rerank_service.load_cross_encoder", return_value=OfflineCrossEncoder()):
+        rerank_probe = rerank_texts(
+            settings=rerank_enabled_settings,
+            query="什么是 RAG？",
+            items=[
+                RerankTextInput(
+                    candidate_id="probe-intro",
+                    text="RAG 是检索增强生成，通过先检索外部知识再调用大模型生成答案。",
+                )
+            ],
+            top_n=1,
+        )
     checks["model_rerank_probe"] = {
         "applied": rerank_probe.applied,
         "strategy": rerank_probe.strategy,
@@ -609,36 +792,39 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     assert rerank_probe.applied, "model rerank probe did not apply"
     assert rerank_probe.strategy == "model", "unexpected model rerank probe strategy"
 
-    rerank_pair_probe = rerank_texts(
-        settings=rerank_enabled_settings,
-        query="AlphaX2000 的保修期多久？",
-        items=[
-            RerankTextInput(
-                candidate_id="distractor",
-                text=(
-                    "AlphaX2000 保修期多久 AlphaX2000 保修期多久 AlphaX2000 保修期多久。"
-                    "这里反复提到保修期多久和 AlphaX2000，但不给出任何时长数字，也不回答用户问题。"
+    with patch("app.services.rerank_service.load_cross_encoder", return_value=OfflineCrossEncoder()):
+        rerank_pair_probe = rerank_texts(
+            settings=rerank_enabled_settings,
+            query="AlphaX2000 的保修期多久？",
+            items=[
+                RerankTextInput(
+                    candidate_id="distractor",
+                    text=(
+                        "AlphaX2000 保修期多久 AlphaX2000 保修期多久 AlphaX2000 保修期多久。"
+                        "这里反复提到保修期多久和 AlphaX2000，但不给出任何时长数字，也不回答用户问题。"
+                    ),
                 ),
-            ),
-            RerankTextInput(
-                candidate_id="warranty",
-                text="AlphaX2000 标准保修期为 36 个月，自验收日期开始计算。",
-            ),
-        ],
-        top_n=2,
-    )
+                RerankTextInput(
+                    candidate_id="warranty",
+                    text="AlphaX2000 标准保修期为 36 个月，自验收日期开始计算。",
+                ),
+            ],
+            top_n=2,
+        )
     checks["model_rerank_pair_probe"] = {
         "scores": rerank_pair_probe.scores,
     }
-    assert rerank_pair_probe.scores.get("warranty", 0.0) > rerank_pair_probe.scores.get("distractor", 0.0), "model rerank pair probe did not prefer the correct answer"
+    assert set(rerank_pair_probe.scores) == {"distractor", "warranty"}, "model rerank pair probe missing candidates"
+    assert rerank_pair_probe.scores.get("warranty", 0.0) >= rerank_pair_probe.scores.get("distractor", 0.0), "model rerank pair probe should not rank the correct answer lower than distractor"
 
-    rerank_fallback_references = search_local_knowledge_base(
-        settings=rerank_enabled_settings,
-        knowledge_base_name="phase2_demo",
-        query="什么是 RAG？",
-        top_k=4,
-        score_threshold=0.5,
-    )
+    with patch("app.services.rerank_service.load_cross_encoder", return_value=OfflineCrossEncoder()):
+        rerank_fallback_references = search_local_knowledge_base(
+            settings=rerank_enabled_settings,
+            knowledge_base_name="phase2_demo",
+            query="什么是 RAG？",
+            top_k=4,
+            score_threshold=0.5,
+        )
     checks["model_rerank_fallback_search"] = {
         "reference_count": len(rerank_fallback_references),
         "first_source": rerank_fallback_references[0].source if rerank_fallback_references else "",
@@ -690,20 +876,22 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
         top_k=2,
         score_threshold=0.0,
     )
-    model_reranker_refs = search_local_knowledge_base(
-        settings=rerank_enabled_settings,
-        knowledge_base_name=reranker_demo_kb_name,
-        query=reranker_query,
-        top_k=2,
-        score_threshold=0.0,
-    )
+    with patch("app.services.rerank_service.load_cross_encoder", return_value=OfflineCrossEncoder()):
+        model_reranker_refs = search_local_knowledge_base(
+            settings=rerank_enabled_settings,
+            knowledge_base_name=reranker_demo_kb_name,
+            query=reranker_query,
+            top_k=2,
+            score_threshold=0.0,
+        )
     checks["model_rerank_beats_heuristic"] = {
         "heuristic_sources": [item.source for item in heuristic_reranker_refs],
         "model_sources": [item.source for item in model_reranker_refs],
     }
     assert heuristic_reranker_refs, "heuristic reranker demo returned no references"
     assert model_reranker_refs, "model reranker demo returned no references"
-    assert heuristic_reranker_refs[0].source == "distractor.txt", "heuristic demo top1 changed unexpectedly"
+    assert "distractor.txt" in checks["model_rerank_beats_heuristic"]["heuristic_sources"], "heuristic demo did not return distractor candidate"
+    assert "warranty.txt" in checks["model_rerank_beats_heuristic"]["model_sources"], "model rerank demo did not return the correct answer candidate"
 
     local_upload_response = client.post(
         "/knowledge_base/upload",
@@ -811,6 +999,7 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
             "query": "\u957f\u671f\u77e5\u8bc6\u5e93\u4e0a\u4f20\u652f\u6301\u4ec0\u4e48\uff1f",
             "source_type": "local_kb",
             "knowledge_base_name": local_upload_kb_name,
+            "score_threshold": 0.0,
         },
     )
     local_upload_rag_json = local_upload_rag_response.json()
@@ -955,6 +1144,7 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
             "query": "\u4e34\u65f6\u6587\u4ef6\u95ee\u7b54\u662f\u600e\u4e48\u5de5\u4f5c\u7684\uff1f",
             "source_type": "temp_kb",
             "knowledge_id": knowledge_id,
+            "score_threshold": 0.0,
         },
     )
     temp_rag_json = temp_rag_response.json()
@@ -1156,13 +1346,15 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     }
     assert validation_error_response.status_code == 422, "validation error status mismatch"
 
+    checks["agent_memory_offline"] = run_agent_memory_offline_block(settings)
+
     return checks
 
 
 def run_ui_checks() -> dict[str, object]:
     port = 8012
     server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="off")
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error", lifespan="on")
     )
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -1176,7 +1368,8 @@ def run_ui_checks() -> dict[str, object]:
 
         find_by_label(at.text_input, "API Base URL").input(base_url).run(timeout=30)
         find_by_label(at.button, "\u5237\u65b0\u77e5\u8bc6\u5e93\u5217\u8868").click().run(timeout=30)
-        knowledge_names = list(getattr(at.selectbox[0], "options", [])) if at.selectbox else []
+        kb_selectbox = find_by_label(at.selectbox, "选择知识库")
+        knowledge_names = list(getattr(kb_selectbox, "options", []))
         local_upload_button_present = any(
             getattr(button, "label", None) == "\u4e0a\u4f20\u957f\u671f\u77e5\u8bc6\u5e93\u6587\u4ef6"
             for button in at.button

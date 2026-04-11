@@ -17,6 +17,7 @@ from app.retrievers.local_kb import (
 from app.schemas.chat import AgentChatRequest, AgentChatResponse, ChatRequest, ChatResponse
 from app.services.reference_overview import build_reference_overview
 from app.services.temp_kb_service import TempKnowledgeBaseExpiredError
+from app.services.web_search_service import search_corrective_web_references
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -59,6 +60,10 @@ def resolve_rag_request(
                     history=request.history,
                     metadata_filters=request.metadata_filters,
                 ),
+                search_web=lambda corrective_query: search_corrective_web_references(
+                    settings=settings,
+                    query=corrective_query,
+                ),
                 source_type=request.source_type,
                 target_name=target_name,
             )
@@ -93,6 +98,10 @@ def resolve_rag_request(
                     score_threshold=corrective_threshold,
                     history=request.history,
                     metadata_filters=request.metadata_filters,
+                ),
+                search_web=lambda corrective_query: search_corrective_web_references(
+                    settings=settings,
+                    query=corrective_query,
                 ),
                 source_type=request.source_type,
                 target_name=target_name,

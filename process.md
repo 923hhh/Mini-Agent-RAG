@@ -372,7 +372,7 @@
 ### 目标
 - 在 `/chat/rag` 主链路中引入“检索结果分级 -> 触发二次检索 -> 再生成答案”的控制环。
 - 优先用 LLM 对当前证据覆盖度做分级，失败时自动回退到启发式分级，避免新增链路把现有 RAG 整体打断。
-- 保持实现范围聚焦在本地知识库二次检索，不在这一版接入网络补搜。
+- 在 `partial` 分级下可选补充网络搜索结果，并和本地二次检索结果统一合并。
 
 ### 实施内容
 - 更新 `app/chains/rag.py`：
@@ -411,8 +411,31 @@
     - `CORRECTIVE_RAG_SECOND_PASS_TOP_K`
     - `CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD`
     - `CORRECTIVE_RAG_MAX_REFERENCES_TO_GRADE`
+    - `ENABLE_CORRECTIVE_WEB_SEARCH`
+    - `CORRECTIVE_WEB_SEARCH_PROVIDER`
+    - `CORRECTIVE_WEB_SEARCH_ENDPOINT`
+    - `CORRECTIVE_WEB_SEARCH_TOP_K`
+    - `CORRECTIVE_WEB_SEARCH_TIMEOUT_SECONDS`
+    - `CORRECTIVE_WEB_SEARCH_SNIPPET_MAX_CHARS`
+- 新增 `app/services/web_search_service.py`：
+  - 默认接入 `duckduckgo_html` provider
+  - 解析 DuckDuckGo HTML 结果页，抽取标题、链接、snippet
+  - 将外部搜索结果映射为 `RetrievedReference`，统一复用现有引用展示与答案生成链路
+- 更新 `app/chains/rag.py`：
+  - `maybe_run_corrective_retrieval()` 新增可选 `search_web` 回调
+  - 当首轮分级为 `partial` 且 `ENABLE_CORRECTIVE_WEB_SEARCH=true` 时，会在本地 second pass 后追加网络补搜
+  - `corrective_rag_trace.jsonl` 增加：
+    - `web_search_triggered`
+    - `web_search_query`
+    - `web_reference_count`
+    - `web_sources`
+    - `web_error_message`
+- 更新 `app/api/chat.py`：
+  - local / temp 两条 `/chat/rag` 路径都把 `search_corrective_web_references()` 作为回调传入 Corrective RAG 控制环
 - 更新 `scripts/validate_phase7.py`：
   - 新增 `corrective_rag_second_pass` 离线 mock 校验
+  - 新增 `corrective_web_search_parser` 解析器校验
+  - 新增 `corrective_rag_web_supplement` 网络补搜合并校验
 
 ### 验证结果
 - 相关文件已通过内存编译检查：
@@ -424,9 +447,77 @@
 - 离线 smoke test 验证通过：
   - 当分级结果为 `partial` 时，会触发二次检索
   - 二次检索会使用 follow-up query，并按配置放大 `top_k`、降低阈值
-  - 两轮检索结果会按相关度去重合并，新增证据优先排前
-- 当前未跑真实联网 /chat/rag 端到端验证，也未实测 LLM 对分级 prompt 的线上表现。
+  - 网络补搜解析器可以从 DuckDuckGo HTML 页面中提取标题、URL 和 snippet
+  - 网络补搜结果会按统一引用结构并入最终 references，和本地证据共同进入生成阶段
+- 已跑完整 `python scripts/validate_phase7.py` 回归通过。
+- 当前未跑真实外网可达条件下的 `/chat/rag` 端到端验证，也未实测公网搜索 provider 的线上稳定性。
 
 ### 当前状态
 - `T4` 已完成到可用版本。
-- 当前版本只做“本地知识库二次检索”控制环，文档中提到的“部分相关时补充网络搜索”仍未接入。
+- 当前版本已包含“本地二次检索 + partial 分支网络补搜”的控制环。
+- 网络补搜默认关闭；需要显式把 `ENABLE_CORRECTIVE_WEB_SEARCH` 设为 `true` 才会生效。
+
+## 2026-04-11 T7 xMemory Agent 长期记忆（Phase 1）
+
+### 目标
+- 落地 `优化方案.md` 第七章 Phase 1：独立 `data/agent_memory/<session_id>/` 存储、`session_id`、turns / episode / semantic 流水线、检索注入 Agent 与 RAG 子路径、trace 可观测性。
+- 默认关闭，不传 `session_id` 时行为与改造前一致。
+
+### 实施内容
+- 配置：`configs/basic_settings.yaml` 与 `BasicSettings` 增加 `ENABLE_AGENT_MEMORY`、`AGENT_MEMORY_ROOT`、`AGENT_MEMORY_EPISODE_MAX_TURNS`、`AGENT_MEMORY_SEMANTIC_TOP_K`、`AGENT_MEMORY_EPISODE_TOP_K`、`AGENT_MEMORY_ENABLE_TURN_EXPANSION`、`AGENT_MEMORY_CONTEXT_CHAR_BUDGET`；`AppSettings` 增加 `agent_memory_root` / `agent_memory_session_dir`。
+- 新增 `app/services/memory_service.py`：
+  - `turns.jsonl` 追加写入；`episode_counter` 元数据；达到 `EPISODE_MAX_TURNS` 时封存 episode 并写入 `episodes.jsonl`，LLM 抽取语义写入 `semantics.jsonl`（失败则启发式摘要 / 跳过抽取）。
+  - 检索：对语义与 episode 摘要做 embedding 余弦排序；可选 `AGENT_MEMORY_ENABLE_TURN_EXPANSION` 拼接近期原话。
+  - `data/logs/memory_build_trace.jsonl`、`memory_retrieval_trace.jsonl`（仅 `ENABLE_AGENT_MEMORY=true` 时写入）。
+- Schema：`AgentChatRequest.session_id`、`AgentChatResponse.session_id` / `memory_overview`；新增 `MemoryOverview`。
+- `app/agents/multistep.py`：请求前 `retrieve_agent_memory`，注入工具规划与直连回答；仅 `search_local_knowledge` 成功路径调用 `generate_rag_answer` / `stream_rag_answer` 时传入 `agent_memory_context`；结束后 `persist_agent_turns`；流式 `done` 携带 `session_id` 与可选 `memory_overview`。
+- `app/chains/rag.py`：`build_rag_variables` 增加长期记忆前缀，与知识库上下文区分。
+- `scripts/validate_phase7.py`：新增 `run_agent_memory_offline_block`（sanitize、`persist`、注入语义 + 离线 embedding mock 检索断言）；离线 RAG mock 兼容 `agent_memory_context` 参数。
+
+### 验证结果
+- 独立运行 `run_agent_memory_offline_block(load_settings(PROJECT_ROOT))` 通过：`invalid_session_rejected`、`semantic_hits>=1`、`used_memory=True`。
+- 全量 `validate_phase7` 依赖本机 API/知识库环境；当前环境若在 `knowledge_base/rebuild` 处 404 会中断，与记忆改动无直接关系。
+
+### 当前状态
+- `T7` Phase 1 已落地；Phase 2（增益式 episode、冲突展开等）仍为后续工作。
+- 需在 `basic_settings.yaml` 将 `ENABLE_AGENT_MEMORY` 设为 `true` 并重启 API 后，`/chat/agent` 传入合法 `session_id` 才会启用长期记忆。
+
+## 2026-04-11 O2 收口 + 完整验证
+
+### 目标
+- 安装缺失依赖并把 `scripts/validate_phase7.py` 跑通，避免当前优化只能停留在零散 smoke。
+- 收掉 `优化方案.md` 中 `O2` 剩余的重复辅助逻辑。
+
+### 实施内容
+- 执行 `python -m pip install -r requirements.txt`，确认 `rank-bm25` 已在当前环境可用。
+- 更新 `scripts/validate_phase7.py`：
+  - 默认 provider 校验改为跟随当前 `model_settings.yaml`，不再硬编码 `ollama`。
+  - `phase2_demo` 改成脚本内自举最小知识库夹具，不再依赖手工准备文档。
+  - 增加离线验证补丁层：
+    - `OfflineDeterministicEmbeddings`
+    - `OfflineCrossEncoder`
+    - 离线 RAG answer / stream mock
+    - Agent tool-planning 的离线回退
+  - 本地 / 临时知识库上传后的 RAG 校验改为更适配离线检索的阈值与断言。
+  - `run_ui_checks()` 改为启用 FastAPI lifespan，并按 label 定位“选择知识库”下拉框。
+  - Agent memory 离线块改为走仓库内临时目录，避免 Windows `Temp` 清理权限把校验判失败。
+- 收口 `O2`：
+  - `app/services/query_rewrite_service.py` 的 query 去重最终复用 `app/utils/text.py::deduplicate_strings`
+  - `app/agents/multistep.py` 删除本地 `unique_preserve_order()`，统一改用 `deduplicate_strings`
+  - `app/retrievers/local_kb.py` 补上遗漏的 `re` import，恢复路径 hint 提取分支
+
+### 验证结果
+- `python scripts/validate_phase7.py` 在当前环境完整通过，API / UI 汇总均成功输出。
+- 相关改动已做内存编译检查通过：
+  - `scripts/validate_phase7.py`
+  - `app/services/query_rewrite_service.py`
+  - `app/agents/multistep.py`
+  - `app/retrievers/local_kb.py`
+- 运行中仍会看到两类非阻断日志：
+  - settings 脱敏提示
+  - Streamlit / uvicorn 退出阶段的警告或 `CancelledError`
+  - 这些未影响脚本最终退出码，完整验证结果为通过。
+
+### 当前状态
+- `O2` 已完成。
+- `validate_phase7.py` 已具备当前环境下的离线完整回归能力，不再依赖外部模型网络可用性。

@@ -23,6 +23,13 @@ class BasicSettings(BaseModel):
     TEMP_ROOT_PATH: str = "./data/temp"
     LOG_PATH: str = "./data/logs"
     VECTOR_STORE_PATH: str = "./data/vector_store"
+    ENABLE_AGENT_MEMORY: bool = False
+    AGENT_MEMORY_ROOT: str = "./data/agent_memory"
+    AGENT_MEMORY_EPISODE_MAX_TURNS: int = Field(default=8, ge=2, le=64)
+    AGENT_MEMORY_SEMANTIC_TOP_K: int = Field(default=5, ge=1, le=20)
+    AGENT_MEMORY_EPISODE_TOP_K: int = Field(default=3, ge=1, le=20)
+    AGENT_MEMORY_ENABLE_TURN_EXPANSION: bool = False
+    AGENT_MEMORY_CONTEXT_CHAR_BUDGET: int = Field(default=3200, ge=200, le=16000)
 
 
 class KBSettings(BaseModel):
@@ -39,6 +46,7 @@ class KBSettings(BaseModel):
     ENABLE_HYDE: bool = False
     ENABLE_HYBRID_RETRIEVAL: bool = True
     ENABLE_CORRECTIVE_RAG: bool = False
+    ENABLE_CORRECTIVE_WEB_SEARCH: bool = False
     ENABLE_HEURISTIC_RERANK: bool = True
     ENABLE_MODEL_RERANK: bool = False
     ENABLE_INCREMENTAL_REBUILD: bool = True
@@ -57,6 +65,11 @@ class KBSettings(BaseModel):
     CORRECTIVE_RAG_SECOND_PASS_TOP_K: int = Field(default=6, ge=1, le=20)
     CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD: float = Field(default=0.25, ge=0.0, le=1.0)
     CORRECTIVE_RAG_MAX_REFERENCES_TO_GRADE: int = Field(default=4, ge=1, le=8)
+    CORRECTIVE_WEB_SEARCH_PROVIDER: str = "duckduckgo_html"
+    CORRECTIVE_WEB_SEARCH_ENDPOINT: str = "https://html.duckduckgo.com/html/"
+    CORRECTIVE_WEB_SEARCH_TOP_K: int = Field(default=3, ge=1, le=8)
+    CORRECTIVE_WEB_SEARCH_TIMEOUT_SECONDS: int = Field(default=12, ge=1, le=60)
+    CORRECTIVE_WEB_SEARCH_SNIPPET_MAX_CHARS: int = Field(default=240, ge=80, le=800)
     RERANK_CANDIDATES_TOP_N: int = Field(default=12, ge=1, le=50)
     RERANK_SCORE_THRESHOLD: float = Field(default=0.0, ge=0.0, le=1.0)
     RERANK_FALLBACK_TO_HEURISTIC: bool = True
@@ -103,6 +116,7 @@ class ModelSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     LLM_PROVIDER: str = "ollama"
+    EMBEDDING_PROVIDER: str = ""  # 留空则跟随 LLM_PROVIDER；可单独设为 "ollama" 或 "openai_compatible"
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OPENAI_COMPATIBLE_BASE_URL: str = ""
     OPENAI_COMPATIBLE_API_KEY: str = ""
@@ -171,6 +185,13 @@ class AppSettings(BaseModel):
     @property
     def vector_store_root(self) -> Path:
         return self.resolve_path(self.basic.VECTOR_STORE_PATH)
+
+    @property
+    def agent_memory_root(self) -> Path:
+        return self.resolve_path(self.basic.AGENT_MEMORY_ROOT)
+
+    def agent_memory_session_dir(self, session_id: str) -> Path:
+        return self.agent_memory_root / session_id
 
     def knowledge_base_dir(self, knowledge_base_name: str) -> Path:
         return self.knowledge_base_root / knowledge_base_name

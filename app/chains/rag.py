@@ -81,10 +81,11 @@ def generate_rag_answer(
     query: str,
     references: list[RetrievedReference],
     history: list[ChatMessage],
+    agent_memory_context: str = "",
 ) -> str:
     prompt_kind = resolve_rag_prompt_kind(query, references)
     prompt = build_rag_prompt(query, references)
-    variables = build_rag_variables(query, references, history)
+    variables = build_rag_variables(query, references, history, agent_memory_context=agent_memory_context)
     llm = build_chat_model(settings)
     chain = prompt | llm | StrOutputParser()
     answer = chain.invoke(variables)
@@ -103,10 +104,11 @@ def stream_rag_answer(
     query: str,
     references: list[RetrievedReference],
     history: list[ChatMessage],
+    agent_memory_context: str = "",
 ) -> Iterator[str]:
     prompt_kind = resolve_rag_prompt_kind(query, references)
     prompt = build_rag_prompt(query, references)
-    variables = build_rag_variables(query, references, history)
+    variables = build_rag_variables(query, references, history, agent_memory_context=agent_memory_context)
     answer_parts: list[str] = []
     for delta in stream_prompt_output(settings, prompt, variables):
         answer_parts.append(delta)
@@ -129,6 +131,7 @@ def maybe_run_corrective_retrieval(
     top_k: int,
     score_threshold: float,
     retrieve: Callable[[str, int, float], list[RetrievedReference]],
+    search_web: Callable[[str], list[RetrievedReference]] | None = None,
     source_type: str,
     target_name: str,
 ) -> list[RetrievedReference]:
@@ -169,6 +172,20 @@ def maybe_run_corrective_retrieval(
         max(top_k + 2, settings.kb.CORRECTIVE_RAG_SECOND_PASS_TOP_K),
     )
     second_pass_threshold = min(score_threshold, settings.kb.CORRECTIVE_RAG_SECOND_PASS_SCORE_THRESHOLD)
+    final_limit = min(
+        24,
+        max(
+            second_pass_top_k,
+            top_k
+            + (
+                settings.kb.CORRECTIVE_WEB_SEARCH_TOP_K
+                if settings.kb.ENABLE_CORRECTIVE_WEB_SEARCH and initial_grade.grade == "partial"
+                else 0
+            ),
+        ),
+    )
+    follow_up_references: list[RetrievedReference] = []
+    second_pass_error = ""
     try:
         follow_up_references = retrieve(
             follow_up_query,
@@ -176,26 +193,39 @@ def maybe_run_corrective_retrieval(
             second_pass_threshold,
         )
     except Exception as exc:
-        append_corrective_trace(
-            settings=settings,
-            query=query,
-            source_type=source_type,
-            target_name=target_name,
-            initial_reference_count=len(references),
-            initial_grade=initial_grade,
-            triggered=True,
-            follow_up_query=follow_up_query,
-            follow_up_reference_count=0,
-            final_references=references,
-            error_message=str(exc),
-        )
-        return references
+        second_pass_error = str(exc)
 
     final_references = merge_corrective_references(
         references,
         follow_up_references,
-        limit=second_pass_top_k,
+        limit=final_limit,
     )
+    web_search_triggered = False
+    web_search_query = ""
+    web_reference_count = 0
+    web_sources: list[str] = []
+    web_error_message = ""
+    if (
+        search_web is not None
+        and settings.kb.ENABLE_CORRECTIVE_WEB_SEARCH
+        and initial_grade.grade == "partial"
+    ):
+        web_search_triggered = True
+        web_search_query = follow_up_query or query.strip()
+        try:
+            web_references = search_web(web_search_query)
+        except Exception as exc:
+            web_error_message = str(exc)
+        else:
+            web_reference_count = len(web_references)
+            web_sources = [item.source for item in web_references[:6]]
+            final_references = merge_corrective_references(
+                final_references,
+                web_references,
+                limit=final_limit,
+            )
+
+    error_messages = [message for message in (second_pass_error, web_error_message) if message]
     append_corrective_trace(
         settings=settings,
         query=query,
@@ -207,6 +237,12 @@ def maybe_run_corrective_retrieval(
         follow_up_query=follow_up_query,
         follow_up_reference_count=len(follow_up_references),
         final_references=final_references,
+        error_message="; ".join(error_messages),
+        web_search_triggered=web_search_triggered,
+        web_search_query=web_search_query,
+        web_reference_count=web_reference_count,
+        web_sources=web_sources,
+        web_error_message=web_error_message,
     )
     return final_references
 
@@ -222,7 +258,9 @@ def build_rag_prompt(
             MessagesPlaceholder("history"),
             (
                 "human",
-                "参考上下文如下：\n{context}\n\n用户问题：\n{query}\n\n请基于参考上下文回答问题。",
+                "{memory_section}参考上下文如下：\n{context}\n\n用户问题：\n{query}\n\n"
+                "请基于参考上下文回答问题。"
+                "若上方提供长期记忆证据且与知识库证据冲突，须分别说明来源，勿强行合并。",
             ),
         ]
     )
@@ -275,11 +313,21 @@ def build_rag_variables(
     query: str,
     references: list[RetrievedReference],
     history: list[ChatMessage],
+    *,
+    agent_memory_context: str = "",
 ) -> dict[str, object]:
     history_messages = convert_history(history)
     context = build_context(references)
+    memory_section = ""
+    trimmed_memory = agent_memory_context.strip()
+    if trimmed_memory:
+        memory_section = (
+            "【长期记忆证据】（来自历史会话抽取，可能与知识库不一致）\n"
+            f"{trimmed_memory}\n\n"
+        )
     return {
         "history": history_messages,
+        "memory_section": memory_section,
         "context": context if context else "当前没有检索到可用上下文。",
         "query": query,
     }
@@ -584,6 +632,11 @@ def append_corrective_trace(
     follow_up_reference_count: int,
     final_references: list[RetrievedReference],
     error_message: str = "",
+    web_search_triggered: bool = False,
+    web_search_query: str = "",
+    web_reference_count: int = 0,
+    web_sources: list[str] | None = None,
+    web_error_message: str = "",
 ) -> None:
     append_jsonl_trace(
         settings,
@@ -600,6 +653,11 @@ def append_corrective_trace(
             "triggered": triggered,
             "follow_up_query": follow_up_query,
             "follow_up_reference_count": follow_up_reference_count,
+            "web_search_triggered": web_search_triggered,
+            "web_search_query": web_search_query,
+            "web_reference_count": web_reference_count,
+            "web_sources": web_sources or [],
+            "web_error_message": web_error_message,
             "final_reference_count": len(final_references),
             "final_sources": [item.source for item in final_references[:6]],
             "error_message": error_message,
