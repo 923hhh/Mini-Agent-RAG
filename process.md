@@ -298,3 +298,71 @@
 ### 当前状态
 - `T1` 已完成到可用版本。
 - `T2` 已完成到可用版本，且默认通过 `ENABLE_HYDE=false` 控制，避免额外 LLM 开销直接影响现有链路。
+
+## 2026-04-11 T5 BM25 持久化
+
+### 目标
+- 将词法检索从“每次请求现算 doc_infos”改为“构建期持久化 BM25 索引，检索期直接加载”。
+- 引入 `rank_bm25` 作为主 BM25 后端，同时保留依赖缺失时的兼容回退，避免本地环境未安装依赖时直接打断检索。
+- 把混合检索里原本硬编码的 dense / lexical 分数权重外提到配置。
+
+### 实施内容
+- 新增 `app/storage/bm25_index.py`：
+  - 统一收敛词法检索辅助逻辑：
+    - `build_search_text_from_parts()`
+    - `build_match_terms()`
+    - `normalize_search_text()`
+  - 新增 BM25 持久化读写与加载缓存：
+    - `write_bm25_index()`
+    - `load_bm25_index()`
+    - `score_bm25_index()`
+    - `resolve_bm25_index_path()`
+  - 磁盘格式采用 `bm25_index.json`，持久化：
+    - `chunk_id`
+    - `search_text`
+    - `terms`
+  - 运行时策略：
+    - 若已安装 `rank_bm25`，加载后使用 `BM25Okapi`
+    - 若未安装，则自动回退到兼容的 legacy BM25 打分逻辑
+- 更新 `app/services/kb_incremental_rebuild.py`：
+  - 全量 / 追加 / 纯复用三种重建模式都会维护 `bm25_index.json`
+  - 追加模式会基于“复用 cache + 新增 chunk”重写完整 BM25 索引，避免旧索引与新向量库脱节
+  - `ENABLE_HYBRID_RETRIEVAL=false` 时会删除已有 BM25 索引
+  - 阶段耗时新增 `bm25_index_write`
+- 更新 `app/services/kb_ingestion_service.py`：
+  - `upload_temp_files()` 现在也会同步写入临时知识库的 BM25 索引，避免 local / temp 行为分叉
+- 更新 `app/retrievers/local_kb.py`：
+  - 检索时优先加载持久化 BM25 索引
+  - 若索引缺失、损坏或加载失败，则自动回退到旧的动态词法路径
+  - retrieval trace 新增：
+    - `bm25_index_available`
+    - `bm25_backend`
+    - `bm25_load_error`
+  - 融合分数里的硬编码权重改为配置项：
+    - `HYBRID_DENSE_SCORE_WEIGHT`
+    - `HYBRID_LEXICAL_SCORE_WEIGHT`
+- 更新配置与依赖：
+  - `app/services/settings.py`
+  - `configs/kb_settings.yaml`
+  - `requirements.txt` 新增 `rank-bm25>=0.2,<1`
+- 更新 `scripts/validate_phase7.py`：
+  - 新增 `incremental_bm25_persisted_index` 校验项，检查 BM25 索引文件存在且可加载
+
+### 验证结果
+- 相关文件已通过内存编译检查：
+  - `app/storage/bm25_index.py`
+  - `app/services/kb_incremental_rebuild.py`
+  - `app/services/kb_ingestion_service.py`
+  - `app/retrievers/local_kb.py`
+  - `app/services/settings.py`
+  - `scripts/validate_phase7.py`
+- 离线 smoke test 验证通过：
+  - 可从样例文档写出并加载 `bm25_index.json`
+  - `score_bm25_index()` 能命中正确 chunk
+  - `write_bm25_index_for_chunk_entries()` 能从增量重建使用的 `CachedChunkEntry` 直接生成索引
+- 当前本地环境未安装 `rank_bm25`，因此离线验证走的是 `fallback` backend。
+- 代码已声明 `requirements.txt` 依赖；安装该依赖后会自动切换到 `rank_bm25` 后端，无需再改代码。
+
+### 当前状态
+- `T5` 已完成到可用版本。
+- 词法检索现在具备“构建期持久化、检索期直接加载、依赖缺失自动回退”的完整链路。

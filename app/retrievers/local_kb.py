@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from math import ceil
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -17,6 +16,15 @@ from app.services.query_rewrite_service import generate_hypothetical_doc, genera
 from app.services.rerank_service import RerankTextInput, rerank_texts
 from app.services.settings import AppSettings
 from app.services.temp_kb_service import ensure_temp_knowledge_available
+from app.storage.bm25_index import (
+    LoadedBM25Index,
+    build_match_terms as build_bm25_match_terms,
+    build_search_text_from_parts,
+    load_bm25_index,
+    normalize_search_text as normalize_bm25_search_text,
+    resolve_bm25_index_path,
+    score_bm25_index,
+)
 from app.storage.filters import (
     FilterCondition,
     FilterOperator,
@@ -28,9 +36,6 @@ from app.storage.vector_stores import BaseVectorStoreAdapter, build_vector_store
 from app.utils.text import coerce_optional_text, deduplicate_strings, extract_document_headers
 
 
-ASCII_TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:/-]*", re.IGNORECASE)
-CJK_SEQUENCE_PATTERN = re.compile(r"[\u4e00-\u9fff]+")
-NON_ALNUM_PATTERN = re.compile(r"[^0-9a-z\u4e00-\u9fff]+", re.IGNORECASE)
 TEXT_QUERY_HINTS = (
     "文档",
     "章节",
@@ -144,6 +149,12 @@ def search_vector_store(
     filtered_documents = filter_documents_by_metadata(all_documents, metadata_filters)
     if not filtered_documents:
         return []
+    bm25_index: LoadedBM25Index | None = None
+    bm25_load_error = ""
+    try:
+        bm25_index = load_bm25_index(resolve_bm25_index_path(vector_store_dir))
+    except Exception as exc:
+        bm25_load_error = str(exc)
 
     query_candidates = generate_multi_queries(settings, query, history)
     rewritten_query = query_candidates[1] if len(query_candidates) > 1 else query.strip()
@@ -157,7 +168,11 @@ def search_vector_store(
         "dense_query_bundle_count": len(dense_query_bundle),
         "hyde_enabled": settings.kb.ENABLE_HYDE,
         "hyde_used": len(dense_query_bundle) > len(query_bundle),
+        "bm25_index_available": bm25_index is not None,
+        "bm25_backend": bm25_index.backend if bm25_index is not None else "dynamic_legacy",
     }
+    if bm25_load_error:
+        retrieval_diagnostics["bm25_load_error"] = bm25_load_error[:200]
     if len(dense_query_bundle) > len(query_bundle):
         retrieval_diagnostics["hyde_preview"] = dense_query_bundle[-1][:160]
     query_profile = infer_query_modality_profile(query_bundle)
@@ -167,6 +182,7 @@ def search_vector_store(
         all_documents=filtered_documents,
         query_bundle=query_bundle,
         dense_query_bundle=dense_query_bundle,
+        bm25_index=bm25_index,
         top_k=top_k,
         metadata_filters=metadata_filters,
         query_profile=query_profile,
@@ -243,6 +259,7 @@ def retrieve_candidates(
     all_documents: dict[str, Document],
     query_bundle: list[str],
     dense_query_bundle: list[str] | None,
+    bm25_index: LoadedBM25Index | None,
     top_k: int,
     metadata_filters: MetadataFilters | None = None,
     query_profile: QueryModalityProfile | None = None,
@@ -307,6 +324,7 @@ def retrieve_candidates(
                     settings=settings,
                     all_documents=modality_groups[source_modality],
                     query_bundle=query_bundle,
+                    bm25_index=bm25_index,
                     candidate_map=candidate_map,
                     lexical_limit=per_modality_lexical_limit,
                 )
@@ -315,6 +333,7 @@ def retrieve_candidates(
                 settings=settings,
                 all_documents=all_documents,
                 query_bundle=query_bundle,
+                bm25_index=bm25_index,
                 candidate_map=candidate_map,
                 lexical_limit=settings.kb.HYBRID_LEXICAL_TOP_K,
             )
@@ -333,8 +352,8 @@ def retrieve_candidates(
             score += 1.0 / (settings.kb.HYBRID_RRF_K + item.dense_rank)
         if item.lexical_rank is not None:
             score += 1.0 / (settings.kb.HYBRID_RRF_K + item.lexical_rank)
-        score += 0.35 * (item.dense_relevance / max_dense)
-        score += 0.25 * (item.lexical_score / max_lexical)
+        score += settings.kb.HYBRID_DENSE_SCORE_WEIGHT * (item.dense_relevance / max_dense)
+        score += settings.kb.HYBRID_LEXICAL_SCORE_WEIGHT * (item.lexical_score / max_lexical)
         score += modality_bonus_for_candidate(item.document, query_profile)
         item.fused_score = score
 
@@ -384,6 +403,7 @@ def collect_lexical_candidates(
     settings: AppSettings,
     all_documents: dict[str, Document],
     query_bundle: list[str],
+    bm25_index: LoadedBM25Index | None,
     candidate_map: dict[str, RetrievalCandidate],
     lexical_limit: int,
 ) -> None:
@@ -391,49 +411,59 @@ def collect_lexical_candidates(
     if not query_terms:
         return
 
-    query_counter = Counter(query_terms)
-    doc_infos = build_lexical_doc_infos(all_documents)
-    total_docs = len(doc_infos)
-    average_length = (
-        sum(item["length"] for item in doc_infos.values()) / total_docs if total_docs else 1.0
-    )
-    document_frequency = Counter()
-    unique_query_terms = set(query_counter)
-    for info in doc_infos.values():
-        terms = info["unique_terms"]
-        for term in unique_query_terms:
-            if term in terms:
-                document_frequency[term] += 1
-
-    lexical_scores: list[tuple[str, float]] = []
     normalized_queries = [normalize_search_text(item) for item in query_bundle if item.strip()]
     plain_queries = [item.lower().strip() for item in query_bundle if item.strip()]
-    for chunk_id, info in doc_infos.items():
-        term_counter: Counter[str] = info["term_counter"]
-        doc_length = max(1, info["length"])
-        score = 0.0
-        for term, query_tf in query_counter.items():
-            term_tf = term_counter.get(term, 0)
-            if term_tf == 0:
+    allowed_chunk_ids = set(all_documents)
+    if bm25_index is not None:
+        lexical_scores = score_bm25_index(
+            index=bm25_index,
+            query_terms=query_terms,
+            normalized_queries=normalized_queries,
+            plain_queries=plain_queries,
+            allowed_chunk_ids=allowed_chunk_ids,
+        )
+    else:
+        query_counter = Counter(query_terms)
+        doc_infos = build_lexical_doc_infos(all_documents)
+        total_docs = len(doc_infos)
+        average_length = (
+            sum(item["length"] for item in doc_infos.values()) / total_docs if total_docs else 1.0
+        )
+        document_frequency = Counter()
+        unique_query_terms = set(query_counter)
+        for info in doc_infos.values():
+            terms = info["unique_terms"]
+            for term in unique_query_terms:
+                if term in terms:
+                    document_frequency[term] += 1
+
+        lexical_scores: list[tuple[str, float]] = []
+        for chunk_id, info in doc_infos.items():
+            term_counter: Counter[str] = info["term_counter"]
+            doc_length = max(1, info["length"])
+            score = 0.0
+            for term, query_tf in query_counter.items():
+                term_tf = term_counter.get(term, 0)
+                if term_tf == 0:
+                    continue
+                df = document_frequency.get(term, 0)
+                idf = log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
+                numerator = term_tf * (1.5 + 1.0)
+                denominator = term_tf + 1.5 * (1.0 - 0.75 + 0.75 * (doc_length / average_length))
+                score += query_tf * idf * (numerator / denominator)
+
+            normalized_text = info["normalized_text"]
+            raw_text = info["raw_text"]
+            if any(query_text and query_text in raw_text for query_text in plain_queries):
+                score += 0.8
+            if any(normalized_query and normalized_query in normalized_text for normalized_query in normalized_queries):
+                score += 1.2
+
+            if score <= 0:
                 continue
-            df = document_frequency.get(term, 0)
-            idf = log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
-            numerator = term_tf * (1.5 + 1.0)
-            denominator = term_tf + 1.5 * (1.0 - 0.75 + 0.75 * (doc_length / average_length))
-            score += query_tf * idf * (numerator / denominator)
+            lexical_scores.append((chunk_id, score))
 
-        normalized_text = info["normalized_text"]
-        raw_text = info["raw_text"]
-        if any(query_text and query_text in raw_text for query_text in plain_queries):
-            score += 0.8
-        if any(normalized_query and normalized_query in normalized_text for normalized_query in normalized_queries):
-            score += 1.2
-
-        if score <= 0:
-            continue
-        lexical_scores.append((chunk_id, score))
-
-    lexical_scores.sort(key=lambda item: item[1], reverse=True)
+        lexical_scores.sort(key=lambda item: item[1], reverse=True)
     for rank, (chunk_id, score) in enumerate(
         lexical_scores[: lexical_limit],
         start=1,
@@ -934,48 +964,19 @@ def path_bonus_for_candidate(
 
 
 def build_search_text(document: Document) -> str:
-    title = str(document.metadata.get("title", "")).strip()
-    section_title = str(document.metadata.get("section_title", "")).strip()
-    section_path = str(document.metadata.get("section_path", "")).strip()
-    source = str(document.metadata.get("source", "")).strip()
-    header_text = " ".join(extract_document_headers(document).values()).strip()
-    content = document.page_content.strip()
-    parts: list[str] = []
-    for item in (title, section_title, section_path, header_text, source, content):
-        if not item or item in parts:
-            continue
-        parts.append(item)
-    return "\n".join(parts)
+    return build_search_text_from_parts(
+        page_content=document.page_content,
+        metadata=document.metadata,
+        headers=extract_document_headers(document),
+    )
 
 
 def build_match_terms(texts: list[str], deduplicate: bool = True) -> list[str]:
-    terms: list[str] = []
-    for text in texts:
-        lowered = text.lower()
-        for match in ASCII_TOKEN_PATTERN.findall(lowered):
-            token = match.strip()
-            if not token:
-                continue
-            terms.append(token)
-            compact = re.sub(r"[^0-9a-z]+", "", token)
-            if len(compact) >= 3 and compact != token:
-                terms.append(compact)
-
-        for sequence in CJK_SEQUENCE_PATTERN.findall(text):
-            if len(sequence) == 1:
-                terms.append(sequence)
-                continue
-            for index in range(len(sequence) - 1):
-                terms.append(sequence[index : index + 2])
-
-    if not deduplicate:
-        return [term for term in terms if term]
-
-    return deduplicate_strings(terms)
+    return build_bm25_match_terms(texts, deduplicate=deduplicate)
 
 
 def normalize_search_text(text: str) -> str:
-    return NON_ALNUM_PATTERN.sub("", text.lower())
+    return normalize_bm25_search_text(text)
 
 
 def get_chunk_id(document: Document, fallback: str = "") -> str:
@@ -1130,6 +1131,9 @@ def append_retrieval_trace(
             "hyde_enabled": diagnostics.get("hyde_enabled", False),
             "hyde_used": diagnostics.get("hyde_used", False),
             "hyde_preview": diagnostics.get("hyde_preview", ""),
+            "bm25_index_available": diagnostics.get("bm25_index_available", False),
+            "bm25_backend": diagnostics.get("bm25_backend", "dynamic_legacy"),
+            "bm25_load_error": diagnostics.get("bm25_load_error", ""),
             "query_type": diagnostics.get("query_type", "unknown"),
             "preferred_modalities": diagnostics.get("preferred_modalities", []),
             "available_modalities": diagnostics.get("available_modalities", {}),

@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.api.main import app
 from app.retrievers.local_kb import build_dense_query_bundle, build_query_bundle, search_local_knowledge_base
+from app.storage.bm25_index import load_bm25_index
 from app.services.kb_incremental_rebuild import chunk_cache_embedding_path, load_chunk_cache
 from app.services.llm_service import build_chat_model, normalize_llm_provider, resolve_openai_compatible_api_key
 from app.services.query_rewrite_service import generate_hypothetical_doc, generate_multi_queries
@@ -225,6 +226,18 @@ def run_api_checks(settings, client: TestClient) -> dict[str, object]:
     assert loaded_chunk_cache.chunk_entries, "chunk cache metadata contains no chunk entries"
     assert loaded_chunk_cache.chunk_entries[0].embedding, "chunk cache did not load embedding from cache"
     assert not checks["incremental_chunk_cache_numpy"]["embedding_in_metadata"], "chunk cache metadata still stores embedding inline"
+
+    bm25_index_path = settings.vector_store_bm25_index_path(incremental_kb_name)
+    loaded_bm25_index = load_bm25_index(bm25_index_path)
+    checks["incremental_bm25_persisted_index"] = {
+        "bm25_index_file": str(bm25_index_path),
+        "exists": bm25_index_path.exists(),
+        "backend": loaded_bm25_index.backend if loaded_bm25_index is not None else "missing",
+        "chunk_count": len(loaded_bm25_index.chunk_ids) if loaded_bm25_index is not None else 0,
+    }
+    assert bm25_index_path.exists(), "bm25 persisted index file missing"
+    assert loaded_bm25_index is not None, "bm25 persisted index failed to load"
+    assert loaded_bm25_index.chunk_ids, "bm25 persisted index contains no chunks"
 
     incremental_reuse_status_code, incremental_reuse_json = submit_rebuild_and_wait(
         client,

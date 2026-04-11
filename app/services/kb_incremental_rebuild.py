@@ -15,6 +15,12 @@ from app.loaders.documents import list_supported_files
 from app.schemas.kb import DocumentChunkRecord, RebuildKnowledgeBaseResult
 from app.services.embedding_assembler import EmbeddingAssembler, extract_header_metadata
 from app.services.settings import AppSettings
+from app.storage.bm25_index import (
+    build_persisted_bm25_document,
+    delete_bm25_index,
+    resolve_bm25_index_path,
+    write_bm25_index,
+)
 from app.storage.vector_stores import (
     VectorStoreEntry,
     vector_store_index_exists,
@@ -113,6 +119,7 @@ def rebuild_incremental_knowledge_base(
     stage_timings: dict[str, float] = {}
     metadata_path = vector_store_dir / "metadata.json"
     manifest_path = settings.vector_store_manifest_path(knowledge_base_name)
+    bm25_index_path = resolve_bm25_index_path(vector_store_dir)
     chunk_cache_dir = settings.vector_store_chunk_cache_dir(knowledge_base_name)
     chunk_cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -148,6 +155,13 @@ def rebuild_incremental_knowledge_base(
     files_deleted = len(deleted_entries)
 
     if index_mode == "reuse":
+        started_at = perf_counter()
+        if settings.kb.ENABLE_HYBRID_RETRIEVAL and not bm25_index_path.exists():
+            reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
+            write_bm25_index_for_caches(bm25_index_path, reused_caches)
+        elif not settings.kb.ENABLE_HYBRID_RETRIEVAL:
+            delete_bm25_index(bm25_index_path)
+        stage_timings["bm25_index_write"] = round(perf_counter() - started_at, 4)
         final_manifest = build_manifest_from_plans(
             knowledge_base_name=knowledge_base_name,
             plans=plans,
@@ -206,6 +220,7 @@ def rebuild_incremental_knowledge_base(
     stage_timings.update(build_caches_result.stage_timings)
     chunks_embedded = sum(cache.chunks for _, cache in rebuilt_outputs.values())
     chunks_reused = sum((plan.manifest_entry.chunks if plan.manifest_entry else 0) for plan in reused_plans)
+    all_chunk_entries_for_bm25: list[CachedChunkEntry] = []
 
     if index_mode == "append":
         started_at = perf_counter()
@@ -220,6 +235,11 @@ def rebuild_incremental_knowledge_base(
             )
         metadata_records = existing_records + [chunk_entry_to_record(item) for item in new_chunk_entries]
         stage_timings["index_build"] = round(perf_counter() - started_at, 4)
+        if settings.kb.ENABLE_HYBRID_RETRIEVAL:
+            reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
+            all_chunk_entries_for_bm25 = flatten_chunk_entries(
+                reused_caches + [cache for _, cache in rebuilt_outputs.values()]
+            )
     else:
         reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
         all_chunk_entries = flatten_chunk_entries(reused_caches + [cache for _, cache in rebuilt_outputs.values()])
@@ -234,10 +254,17 @@ def rebuild_incremental_knowledge_base(
         )
         metadata_records = [chunk_entry_to_record(item) for item in all_chunk_entries]
         stage_timings["index_build"] = round(perf_counter() - started_at, 4)
+        all_chunk_entries_for_bm25 = all_chunk_entries
 
     started_at = perf_counter()
     write_metadata_records(metadata_path, metadata_records)
     stage_timings["metadata_write"] = round(perf_counter() - started_at, 4)
+    started_at = perf_counter()
+    if settings.kb.ENABLE_HYBRID_RETRIEVAL:
+        write_bm25_index_for_chunk_entries(bm25_index_path, all_chunk_entries_for_bm25)
+    else:
+        delete_bm25_index(bm25_index_path)
+    stage_timings["bm25_index_write"] = round(perf_counter() - started_at, 4)
     final_manifest = build_manifest_from_plans(
         knowledge_base_name=knowledge_base_name,
         plans=plans,
@@ -613,6 +640,26 @@ def write_metadata_records(path: Path, records: list[DocumentChunkRecord]) -> No
         json.dumps([record.model_dump() for record in records], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def write_bm25_index_for_caches(path: Path, caches: list[FileChunkCache]) -> None:
+    write_bm25_index_for_chunk_entries(path, flatten_chunk_entries(caches))
+
+
+def write_bm25_index_for_chunk_entries(path: Path, chunk_entries: list[CachedChunkEntry]) -> None:
+    documents = [
+        build_persisted_bm25_document(
+            chunk_id=entry.chunk_id,
+            page_content=entry.page_content,
+            metadata=entry.metadata,
+            headers=extract_header_metadata(entry.metadata),
+        )
+        for entry in chunk_entries
+    ]
+    if not documents:
+        delete_bm25_index(path)
+        return
+    write_bm25_index(path, documents)
 
 
 def cleanup_deleted_caches(chunk_cache_dir: Path, deleted_entries: list[BuildManifestEntry]) -> None:

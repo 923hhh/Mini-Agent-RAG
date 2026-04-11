@@ -15,7 +15,14 @@ from app.services.embedding_assembler import EmbeddingAssembler
 from app.services.kb_incremental_rebuild import rebuild_incremental_knowledge_base
 from app.services.settings import AppSettings
 from app.services.temp_kb_service import create_temp_manifest, write_temp_manifest
+from app.storage.bm25_index import (
+    build_persisted_bm25_document,
+    delete_bm25_index,
+    resolve_bm25_index_path,
+    write_bm25_index,
+)
 from app.storage.vector_stores import vector_store_index_exists
+from app.utils.text import extract_header_metadata
 
 
 def ensure_knowledge_base_layout(settings: AppSettings, knowledge_base_name: str) -> tuple[Path, Path]:
@@ -186,6 +193,22 @@ def upload_temp_files(
         json.dumps(metadata_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    bm25_index_path = resolve_bm25_index_path(vector_store_dir)
+    if settings.kb.ENABLE_HYBRID_RETRIEVAL:
+        write_bm25_index(
+            bm25_index_path,
+            [
+                build_persisted_bm25_document(
+                    chunk_id=entry.chunk_id,
+                    page_content=entry.page_content,
+                    metadata=entry.metadata,
+                    headers=extract_header_metadata(entry.metadata),
+                )
+                for entry in assembled.entries
+            ],
+        )
+    else:
+        delete_bm25_index(bm25_index_path)
 
     manifest = create_temp_manifest(
         settings=settings,

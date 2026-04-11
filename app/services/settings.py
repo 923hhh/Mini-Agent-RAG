@@ -50,6 +50,8 @@ class KBSettings(BaseModel):
     HYBRID_LEXICAL_TOP_K: int = Field(default=30, ge=1, le=100)
     HYBRID_RERANK_TOP_K: int = Field(default=5, ge=1, le=50)
     HYBRID_RRF_K: int = Field(default=60, ge=1, le=200)
+    HYBRID_DENSE_SCORE_WEIGHT: float = Field(default=0.35, ge=0.0, le=2.0)
+    HYBRID_LEXICAL_SCORE_WEIGHT: float = Field(default=0.25, ge=0.0, le=2.0)
     MULTI_QUERY_MAX_QUERIES: int = Field(default=3, ge=1, le=6)
     RERANK_CANDIDATES_TOP_N: int = Field(default=12, ge=1, le=50)
     RERANK_SCORE_THRESHOLD: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -177,6 +179,9 @@ class AppSettings(BaseModel):
 
     def vector_store_manifest_path(self, knowledge_base_name: str) -> Path:
         return self.vector_store_dir(knowledge_base_name) / "build_manifest.json"
+
+    def vector_store_bm25_index_path(self, knowledge_base_name: str) -> Path:
+        return self.vector_store_dir(knowledge_base_name) / "bm25_index.json"
 
     def vector_store_cache_dir(self, knowledge_base_name: str) -> Path:
         return self.vector_store_dir(knowledge_base_name) / "cache"
