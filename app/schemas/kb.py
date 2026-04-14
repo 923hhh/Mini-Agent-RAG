@@ -79,6 +79,7 @@ class RebuildTaskAccepted(BaseModel):
     knowledge_base_name: str
     status: str
     progress: float = 0.0
+    progress_message: str | None = None
     created_at: datetime
 
 
@@ -89,6 +90,7 @@ class RebuildTaskStatus(BaseModel):
     knowledge_base_name: str
     status: str
     progress: float = 0.0
+    progress_message: str | None = None
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None

@@ -44,6 +44,7 @@ configs/model_settings.yaml
 data/knowledge_base/
 data/vector_store/
 data/eval/
+data/cache/
 data/external/
 data/models/
 data/huggingface/

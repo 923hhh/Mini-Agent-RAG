@@ -17,11 +17,20 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.chains.rag import generate_rag_answer
 from app.retrievers.local_kb import search_local_knowledge_base
+from app.services.crud_eval_cases import (
+    SUPPORTED_TASKS,
+    build_cases,
+    load_crud_rag_items,
+    normalize_tasks,
+    resolve_data_file,
+)
+from app.services.eval_reference_utils import (
+    build_reference_eval_text,
+    build_top_reference_details,
+    infer_reference_sample_id,
+)
 from app.services.reference_overview import build_reference_overview
 from app.services.settings import load_settings
-
-
-SUPPORTED_TASKS = ("quest_answer", "summary")
 
 
 def main() -> int:
@@ -109,184 +118,6 @@ def main() -> int:
     return 0
 
 
-def normalize_tasks(values: list[str]) -> list[str]:
-    supported = set(SUPPORTED_TASKS)
-    normalized: list[str] = []
-    for value in values:
-        task = str(value).strip().lower()
-        if task not in supported:
-            raise ValueError(f"不支持的任务类型: {value}。支持: {', '.join(SUPPORTED_TASKS)}")
-        if task not in normalized:
-            normalized.append(task)
-    if not normalized:
-        raise ValueError("至少需要一个任务类型。")
-    return normalized
-
-
-def resolve_data_file(data_file: str, crud_rag_root: str) -> Path:
-    if data_file:
-        path = Path(data_file)
-        if not path.is_absolute():
-            path = (PROJECT_ROOT / path).resolve()
-        if not path.exists():
-            raise FileNotFoundError(f"CRUD_RAG 数据文件不存在: {path}")
-        return path
-
-    if not crud_rag_root:
-        raise ValueError("请提供 --data-file 或 --crud-rag-root。")
-
-    root = Path(crud_rag_root)
-    if not root.is_absolute():
-        root = (PROJECT_ROOT / root).resolve()
-    if not root.exists():
-        raise FileNotFoundError(f"CRUD_RAG 仓库目录不存在: {root}")
-
-    candidates = [
-        root / "split_merged.json",
-        root / "data" / "split_merged.json",
-        root / "dataset" / "split_merged.json",
-        root / "datasets" / "split_merged.json",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-
-    found = sorted(root.rglob("split_merged.json"))
-    if found:
-        return found[0]
-    raise FileNotFoundError(f"在 {root} 下未找到 split_merged.json。")
-
-
-def load_crud_rag_items(path: Path) -> list[dict[str, Any]]:
-    suffix = path.suffix.lower()
-    if suffix == ".jsonl":
-        items: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8-sig").splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            obj = json.loads(stripped)
-            if isinstance(obj, dict):
-                items.append(obj)
-        return items
-
-    raw = json.loads(path.read_text(encoding="utf-8-sig"))
-    return normalize_json_payload_to_items(raw)
-
-
-def normalize_json_payload_to_items(raw: Any) -> list[dict[str, Any]]:
-    if isinstance(raw, list):
-        return [item for item in raw if isinstance(item, dict)]
-
-    if not isinstance(raw, dict):
-        raise ValueError("CRUD_RAG 数据格式无效，期望 JSON 数组、JSONL 或映射对象。")
-
-    items: list[dict[str, Any]] = []
-    if "data" in raw and isinstance(raw["data"], list):
-        items.extend(item for item in raw["data"] if isinstance(item, dict))
-    if "items" in raw and isinstance(raw["items"], list):
-        items.extend(item for item in raw["items"] if isinstance(item, dict))
-
-    for task_name in SUPPORTED_TASKS:
-        task_value = raw.get(task_name)
-        if isinstance(task_value, list):
-            for item in task_value:
-                if isinstance(item, dict):
-                    merged = dict(item)
-                    merged.setdefault("task", task_name)
-                    items.append(merged)
-
-    if items:
-        return items
-
-    raise ValueError("无法从 JSON 中解析出 CRUD_RAG 样本列表。")
-
-
-def build_cases(
-    items: list[dict[str, Any]],
-    selected_tasks: list[str],
-) -> list[dict[str, str]]:
-    task_set = set(selected_tasks)
-    cases: list[dict[str, str]] = []
-    for index, item in enumerate(items, start=1):
-        task = infer_task_name(item)
-        if task not in task_set:
-            continue
-
-        case = build_case(item, task, fallback_index=index)
-        if case is None:
-            continue
-        cases.append(case)
-    return cases
-
-
-def infer_task_name(item: dict[str, Any]) -> str | None:
-    explicit_keys = ("task", "task_name", "type", "category")
-    for key in explicit_keys:
-        value = str(item.get(key, "")).strip().lower()
-        if value in SUPPORTED_TASKS:
-            return value
-
-    has_question = bool(first_non_empty(item, ("question", "questions", "query_question", "ask")))
-    has_answer = bool(first_non_empty(item, ("answer", "answers", "gold_answer", "target_answer")))
-    has_summary = bool(first_non_empty(item, ("summary", "gold_summary", "target_summary")))
-    has_event = bool(first_non_empty(item, ("event", "title", "context", "instruction")))
-
-    if has_question and has_answer:
-        return "quest_answer"
-    if has_summary and has_event:
-        return "summary"
-    return None
-
-
-def build_case(
-    item: dict[str, Any],
-    task: str,
-    *,
-    fallback_index: int,
-) -> dict[str, str] | None:
-    case_id = (
-        first_non_empty(item, ("case_id", "id", "uid", "sample_id"))
-        or f"{task}-{fallback_index:06d}"
-    )
-    event = first_non_empty(item, ("event", "title", "context", "instruction"))
-
-    if task == "summary":
-        gold_answer = first_non_empty(item, ("summary", "gold_summary", "target_summary"))
-        if not event or not gold_answer:
-            return None
-        retrieval_query = event
-        generation_query = f"请基于知识库检索内容，对以下事件写一段简洁摘要：\n{event}"
-        return {
-            "case_id": case_id,
-            "task": task,
-            "event": event,
-            "question": "",
-            "gold_answer": gold_answer,
-            "retrieval_query": retrieval_query,
-            "generation_query": generation_query,
-        }
-
-    question = first_non_empty(item, ("question", "questions", "query_question", "ask"))
-    gold_answer = first_non_empty(item, ("answer", "answers", "gold_answer", "target_answer"))
-    if not question or not gold_answer:
-        return None
-    retrieval_query = f"{event}\n{question}".strip() if event else question
-    if event:
-        generation_query = f"事件背景：{event}\n\n问题：{question}"
-    else:
-        generation_query = question
-    return {
-        "case_id": case_id,
-        "task": task,
-        "event": event,
-        "question": question,
-        "gold_answer": gold_answer,
-        "retrieval_query": retrieval_query,
-        "generation_query": generation_query,
-    }
-
-
 def evaluate_cases(
     *,
     settings,
@@ -345,6 +176,7 @@ def evaluate_cases(
         detail: dict[str, Any] = {
             "case_id": case["case_id"],
             "task": case["task"],
+            "source_task": case.get("source_task", case["task"]),
             "query": case["generation_query"],
             "retrieval_query": case["retrieval_query"],
             "gold_answer": gold_answer,
@@ -352,6 +184,9 @@ def evaluate_cases(
             "reference_overview": reference_overview,
             "retrieval_metrics": retrieval_metrics,
             "top_sources": [ref.source for ref in references],
+            "top_source_paths": [ref.source_path for ref in references],
+            "top_source_sample_ids": [infer_reference_sample_id(ref.source_path) for ref in references],
+            "top_references": build_top_reference_details(references),
             "top_modalities": [ref.source_modality for ref in references],
             "status": "ok",
         }
@@ -398,23 +233,6 @@ def evaluate_cases(
         "details": details if show_cases else [],
     }
     return summary
-
-
-def build_reference_eval_text(references) -> str:
-    parts: list[str] = []
-    for ref in references:
-        for value in (
-            getattr(ref, "content", ""),
-            getattr(ref, "ocr_text", ""),
-            getattr(ref, "image_caption", ""),
-            getattr(ref, "evidence_summary", ""),
-        ):
-            text = str(value or "").strip()
-            if text:
-                parts.append(text)
-    return "\n".join(parts)
-
-
 def compute_retrieval_proxy_metrics(
     *,
     task: str,
@@ -539,24 +357,6 @@ def sentence_bleu(pred: str, gold: str, *, max_n: int) -> float:
     if len(pred_tokens) < len(gold_tokens):
         bp = math.exp(1 - (len(gold_tokens) / max(len(pred_tokens), 1)))
     return bp * math.exp(log_precision)
-
-
-def first_non_empty(item: dict[str, Any], keys: tuple[str, ...]) -> str:
-    for key in keys:
-        value = item.get(key)
-        if value is None:
-            continue
-        if isinstance(value, list):
-            for nested in value:
-                text = str(nested).strip()
-                if text:
-                    return text
-            continue
-        text = str(value).strip()
-        if text:
-            return text
-    return ""
-
 
 class MetricAccumulator:
     def __init__(self) -> None:

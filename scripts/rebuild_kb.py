@@ -60,6 +60,7 @@ def main() -> int:
             embedding_model=args.embedding_model,
             enable_image_vlm_for_build=args.enable_image_vlm_for_build,
             force_full_rebuild=args.force_full_rebuild,
+            progress_callback=render_rebuild_progress,
         )
     except Exception as exc:
         print(f"知识库重建失败: {exc}", file=sys.stderr)
@@ -67,6 +68,11 @@ def main() -> int:
 
     print(render_rebuild_summary(result))
     return 0
+
+
+def render_rebuild_progress(progress: float, message: str) -> None:
+    percent = max(0.0, min(100.0, progress * 100))
+    print(f"{percent:6.2f}% {message}", flush=True)
 
 
 if __name__ == "__main__":

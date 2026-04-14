@@ -30,6 +30,7 @@ def submit_rebuild_task(
         knowledge_base_name=request.knowledge_base_name,
         status="pending",
         progress=0.0,
+        progress_message="等待重建任务开始",
         created_at=created_at,
     )
     with _task_lock:
@@ -40,6 +41,7 @@ def submit_rebuild_task(
         knowledge_base_name=request.knowledge_base_name,
         status=task.status,
         progress=task.progress,
+        progress_message=task.progress_message,
         created_at=created_at,
     )
 
@@ -63,7 +65,8 @@ def _run_rebuild_task(
         _tasks[task_id] = task.model_copy(
             update={
                 "status": "running",
-                "progress": 0.1,
+                "progress": 0.02,
+                "progress_message": "开始重建任务",
                 "started_at": started_at,
                 "error_message": None,
             }
@@ -78,6 +81,11 @@ def _run_rebuild_task(
             embedding_model=request.embedding_model,
             enable_image_vlm_for_build=request.enable_image_vlm_for_build,
             force_full_rebuild=request.force_full_rebuild,
+            progress_callback=lambda progress, message: _update_task_progress(
+                task_id,
+                progress=progress,
+                progress_message=message,
+            ),
         )
     except Exception as exc:
         finished_at = datetime.now(UTC)
@@ -87,6 +95,7 @@ def _run_rebuild_task(
                 update={
                     "status": "failed",
                     "progress": 1.0,
+                    "progress_message": "重建失败",
                     "finished_at": finished_at,
                     "error_message": str(exc),
                 }
@@ -100,8 +109,28 @@ def _run_rebuild_task(
             update={
                 "status": "succeeded",
                 "progress": 1.0,
+                "progress_message": "重建完成",
                 "finished_at": finished_at,
                 "result": result,
+            }
+        )
+
+
+def _update_task_progress(
+    task_id: str,
+    *,
+    progress: float,
+    progress_message: str,
+) -> None:
+    with _task_lock:
+        task = _tasks.get(task_id)
+        if task is None or task.status not in {"pending", "running"}:
+            return
+        _tasks[task_id] = task.model_copy(
+            update={
+                "status": "running",
+                "progress": max(0.0, min(1.0, progress)),
+                "progress_message": progress_message,
             }
         )
 

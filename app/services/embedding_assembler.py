@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +62,7 @@ class EmbeddingAssembler:
         content_dir: Path,
         paths: list[Path],
         workers: int | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> dict[str, list[Document]]:
         if not paths:
             return {}
@@ -71,19 +73,28 @@ class EmbeddingAssembler:
             for path in paths
         }
         if max_workers <= 1 or len(relative_paths) <= 1:
-            return {
-                relative_path: load_file(path, content_dir, settings=self.settings)
-                for relative_path, path in relative_paths.items()
-            }
+            results: dict[str, list[Document]] = {}
+            total = len(relative_paths)
+            for index, (relative_path, path) in enumerate(relative_paths.items(), start=1):
+                results[relative_path] = load_file(path, content_dir, settings=self.settings)
+                if progress_callback is not None:
+                    progress_callback(index, total, relative_path)
+            return results
 
         results: dict[str, list[Document]] = {}
+        total = len(relative_paths)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
                 executor.submit(load_file, path, content_dir, self.settings): relative_path
                 for relative_path, path in relative_paths.items()
             }
-            for future, relative_path in future_map.items():
+            completed = 0
+            for future in as_completed(future_map):
+                relative_path = future_map[future]
                 results[relative_path] = future.result()
+                completed += 1
+                if progress_callback is not None:
+                    progress_callback(completed, total, relative_path)
         return results
 
     def split_loaded_documents(

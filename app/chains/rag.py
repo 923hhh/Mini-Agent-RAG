@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -18,11 +19,16 @@ from app.services.streaming_llm import stream_prompt_output
 
 
 RAG_SYSTEM_PROMPT = """你是一个基于本地知识库的问答助手。
-请优先依据提供的上下文回答用户问题，不要编造上下文中不存在的事实。
+请严格依据提供的上下文回答用户问题，不要编造上下文中不存在的事实。
 如果上下文不足以回答问题，请明确说明“根据当前检索到的内容，无法确定”并给出缺失信息。
+不要把相似事实当成目标答案，不要补充常识性猜测。
 回答尽量简洁、准确，并优先提炼要点。
+如果问题包含多个并列子问题、多个角色、多个原因、多个措施或“哪些/分别/同时/以及”等要求，必须逐项覆盖，不得遗漏。
+若上下文已经明确列出了清单、步骤、职责、原因或措施，回答时应尽量完整保留这些要点，而不是只做笼统概括。
+优先使用分点或小标题作答，让每个子问题都有明确落点。
 如果上下文包含“文本证据 / OCR 证据 / 视觉描述证据”，请区分哪些信息是直接证据，哪些只是推断。
-不要把 OCR 识别文本与视觉描述混为同一类事实。"""
+不要把 OCR 识别文本与视觉描述混为同一类事实。
+除非用户明确要求，不要在答案中写“根据上下文”“根据参考资料”“来源如下”等套话。"""
 
 IMAGE_RAG_SYSTEM_PROMPT = """你是一个基于本地知识库的多模态问答助手。
 当前问题更偏向图片、OCR 或视觉描述理解，请优先依据提供的图片相关证据回答。
@@ -69,12 +75,81 @@ CORRECTIVE_RAG_QUERY_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+RAG_COMPLETENESS_REVIEW_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是 RAG 答案完备性审校器。"
+            "你只能依据给定证据检查当前答案是否漏答、缺少并列要点、遗漏角色职责或清单项。"
+            "不要补充证据中不存在的事实。"
+            "只允许输出 JSON，不要输出额外解释。"
+            'JSON schema: {"status":"ok|revise","missing_points":["<=30字"],"revised_answer":"string"}。'
+            "若当前答案已足够完整，status=ok，revised_answer 置空字符串。",
+        ),
+        (
+            "human",
+            "证据事实：\n{context}\n\n{coverage_requirements}"
+            "用户问题：\n{query}\n\n当前答案草稿：\n{draft_answer}\n\n"
+            "请检查是否存在漏答、列表不全、并列子问题未覆盖或角色遗漏。"
+            "若需要修改，请直接给出修订后的最终答案。",
+        ),
+    ]
+)
+
+RAG_EVIDENCE_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "你是 RAG 证据抽取器。"
+            "你只能依据给定证据抽取可直接用于回答用户问题的事实。"
+            "不要补充常识，不要猜测，不要改写成答案。"
+            "只允许输出 JSON。"
+            'JSON schema: {"facts":["<=80字"],"unknown_points":["<=40字"],"checklist_coverage":[{"item":"string","covered":true|false}]}。',
+        ),
+        (
+            "human",
+            "用户问题：\n{query}\n\n{coverage_requirements}"
+            "证据上下文：\n{context}\n\n"
+            "请提取与回答直接相关的关键事实，并指出证据不足的点。",
+        ),
+    ]
+)
+
+RAG_ANSWER_FROM_EVIDENCE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", RAG_SYSTEM_PROMPT),
+        MessagesPlaceholder("history"),
+        (
+            "human",
+            "{memory_section}已抽取的证据事实如下：\n{evidence_facts}\n\n{coverage_requirements}"
+            "用户问题：\n{query}\n\n"
+            "请只依据上述证据事实作答。"
+            "如果某个问题没有足够证据，请直接说明“根据当前检索到的内容，无法确定”。"
+            "不要补充证据事实之外的新信息。",
+        ),
+    ]
+)
+
 
 @dataclass(frozen=True)
 class RetrievalCoverageGrade:
     grade: str
     reason: str
     missing_aspects: str = ""
+
+
+@dataclass(frozen=True)
+class ContextBuildResult:
+    text: str
+    reference_count: int
+    context_chars: int
+
+
+@dataclass(frozen=True)
+class EvidenceExtractionResult:
+    facts_text: str
+    fact_count: int
+    unknown_count: int
 
 def generate_rag_answer(
     settings: AppSettings,
@@ -84,17 +159,58 @@ def generate_rag_answer(
     agent_memory_context: str = "",
 ) -> str:
     prompt_kind = resolve_rag_prompt_kind(query, references)
-    prompt = build_rag_prompt(query, references)
-    variables = build_rag_variables(query, references, history, agent_memory_context=agent_memory_context)
-    llm = build_chat_model(settings)
-    chain = prompt | llm | StrOutputParser()
-    answer = chain.invoke(variables)
+    variables = build_rag_variables(
+        query,
+        references,
+        history,
+        agent_memory_context=agent_memory_context,
+        compress_context=(prompt_kind == "default"),
+    )
+    context_meta: ContextBuildResult = variables.pop("_context_meta")
+    llm = build_chat_model(settings, temperature=0.0)
+    evidence_meta = EvidenceExtractionResult(
+        facts_text=str(variables["context"]),
+        fact_count=0,
+        unknown_count=0,
+    )
+    if prompt_kind == "default":
+        evidence_meta = extract_rag_evidence(
+            settings=settings,
+            query=query,
+            context=str(variables["context"]),
+            coverage_requirements=str(variables["coverage_requirements"]),
+        )
+        answer = generate_answer_from_evidence(
+            llm=llm,
+            history=history,
+            memory_section=str(variables["memory_section"]),
+            query=query,
+            coverage_requirements=str(variables["coverage_requirements"]),
+            evidence_facts=evidence_meta.facts_text,
+        )
+    else:
+        prompt = build_rag_prompt(query, references)
+        chain = prompt | llm | StrOutputParser()
+        answer = chain.invoke(variables)
+    answer = maybe_refine_rag_answer(
+        settings=settings,
+        query=query,
+        references=references,
+        context=evidence_meta.facts_text,
+        coverage_requirements=str(variables["coverage_requirements"]),
+        draft_answer=answer,
+    )
     append_answer_trace(
         settings=settings,
         query=query,
         references=references,
         prompt_kind=prompt_kind,
         answer=answer,
+        compressed_reference_count=context_meta.reference_count,
+        compressed_context_chars=context_meta.context_chars,
+        evidence_fact_count=evidence_meta.fact_count,
+        evidence_unknown_count=evidence_meta.unknown_count,
+        coverage_requirement_count=count_coverage_requirements(str(variables["coverage_requirements"])),
     )
     return answer
 
@@ -109,8 +225,9 @@ def stream_rag_answer(
     prompt_kind = resolve_rag_prompt_kind(query, references)
     prompt = build_rag_prompt(query, references)
     variables = build_rag_variables(query, references, history, agent_memory_context=agent_memory_context)
+    context_meta: ContextBuildResult = variables.pop("_context_meta")
     answer_parts: list[str] = []
-    for delta in stream_prompt_output(settings, prompt, variables):
+    for delta in stream_prompt_output(settings, prompt, variables, temperature=0.0):
         answer_parts.append(delta)
         yield delta
     append_answer_trace(
@@ -119,6 +236,8 @@ def stream_rag_answer(
         references=references,
         prompt_kind=prompt_kind,
         answer="".join(answer_parts),
+        compressed_reference_count=context_meta.reference_count,
+        compressed_context_chars=context_meta.context_chars,
     )
 
 
@@ -258,7 +377,8 @@ def build_rag_prompt(
             MessagesPlaceholder("history"),
             (
                 "human",
-                "{memory_section}参考上下文如下：\n{context}\n\n用户问题：\n{query}\n\n"
+                "{memory_section}参考上下文如下：\n{context}\n\n{coverage_requirements}"
+                "用户问题：\n{query}\n\n"
                 "请基于参考上下文回答问题。"
                 "若上方提供长期记忆证据且与知识库证据冲突，须分别说明来源，勿强行合并。",
             ),
@@ -315,9 +435,10 @@ def build_rag_variables(
     history: list[ChatMessage],
     *,
     agent_memory_context: str = "",
+    compress_context: bool = False,
 ) -> dict[str, object]:
     history_messages = convert_history(history)
-    context = build_context(references)
+    context_meta = build_context(references, compress=compress_context)
     memory_section = ""
     trimmed_memory = agent_memory_context.strip()
     if trimmed_memory:
@@ -328,14 +449,22 @@ def build_rag_variables(
     return {
         "history": history_messages,
         "memory_section": memory_section,
-        "context": context if context else "当前没有检索到可用上下文。",
+        "context": context_meta.text if context_meta.text else "当前没有检索到可用上下文。",
+        "coverage_requirements": build_coverage_requirements(query),
         "query": query,
+        "_context_meta": context_meta,
     }
 
 
-def build_context(references: list[RetrievedReference]) -> str:
+def build_context(
+    references: list[RetrievedReference],
+    *,
+    compress: bool = False,
+) -> ContextBuildResult:
     if not references:
-        return ""
+        return ContextBuildResult(text="", reference_count=0, context_chars=0)
+
+    ordered_references = compress_references_for_answer(references) if compress else references
 
     grouped_blocks = {
         "text": [],
@@ -343,9 +472,9 @@ def build_context(references: list[RetrievedReference]) -> str:
         "vision": [],
     }
 
-    for index, ref in enumerate(references, start=1):
+    for index, ref in enumerate(ordered_references, start=1):
         grouped_blocks[resolve_reference_context_group(ref)].append(
-            format_reference_block(index, ref)
+            format_reference_block(index, ref, compressed=compress)
         )
 
     sections: list[str] = []
@@ -360,7 +489,306 @@ def build_context(references: list[RetrievedReference]) -> str:
             continue
         sections.append(f"## {title}\n" + "\n\n".join(blocks))
 
-    return "\n\n".join(sections)
+    text = "\n\n".join(sections)
+    return ContextBuildResult(
+        text=text,
+        reference_count=len(ordered_references),
+        context_chars=len(text),
+    )
+
+
+def build_coverage_requirements(query: str) -> str:
+    normalized = str(query or "").strip()
+    if not normalized:
+        return ""
+
+    lines = split_query_into_requirements(normalized)
+    if len(lines) <= 1:
+        return ""
+
+    rendered = "\n".join(
+        f"{index}. {line}" for index, line in enumerate(lines, start=1)
+    )
+    return (
+        "请确保回答至少覆盖以下子问题或要点：\n"
+        f"{rendered}\n\n"
+    )
+
+
+def split_query_into_requirements(query: str) -> list[str]:
+    cleaned = query.replace("问题：", " ").replace("请回答：", " ").strip()
+    for token in ("\r", "\n", "\t"):
+        cleaned = cleaned.replace(token, " ")
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return []
+
+    candidate_parts = [cleaned]
+    split_patterns = (
+        "同时",
+        "以及",
+        "并且",
+        "并说明",
+        "并回答",
+        "并分别",
+        "分别说明",
+        "分别指出",
+        "；",
+        ";",
+        "？",
+        "?",
+    )
+    for marker in split_patterns:
+        next_parts: list[str] = []
+        changed = False
+        for part in candidate_parts:
+            pieces = [piece.strip(" ，,。；;？?") for piece in part.split(marker)]
+            pieces = [piece for piece in pieces if piece]
+            if len(pieces) > 1:
+                changed = True
+                next_parts.extend(pieces)
+            else:
+                next_parts.append(part)
+        candidate_parts = next_parts
+        if changed:
+            break
+
+    deduped: list[str] = []
+    for part in candidate_parts:
+        normalized_part = part.strip(" ，,。；;？?")
+        if not normalized_part:
+            continue
+        if normalized_part not in deduped:
+            deduped.append(normalized_part)
+    return deduped
+
+
+def maybe_refine_rag_answer(
+    *,
+    settings: AppSettings,
+    query: str,
+    references: list[RetrievedReference],
+    context: str,
+    coverage_requirements: str,
+    draft_answer: str,
+) -> str:
+    if not should_run_answer_completeness_review(
+        query=query,
+        references=references,
+        coverage_requirements=coverage_requirements,
+        draft_answer=draft_answer,
+    ):
+        return draft_answer
+
+    model_name = settings.model.QUERY_REWRITE_MODEL.strip() or settings.model.DEFAULT_LLM_MODEL
+    try:
+        llm = build_chat_model(settings, model_name=model_name, temperature=0.0)
+        chain = RAG_COMPLETENESS_REVIEW_PROMPT | llm | StrOutputParser()
+        raw_output = chain.invoke(
+            {
+                "context": context,
+                "coverage_requirements": coverage_requirements,
+                "query": query.strip(),
+                "draft_answer": draft_answer.strip(),
+            }
+        )
+    except Exception:
+        return draft_answer
+
+    payload = extract_json_payload(raw_output)
+    if not isinstance(payload, dict):
+        return draft_answer
+
+    status = str(payload.get("status", "")).strip().lower()
+    revised_answer = str(payload.get("revised_answer", "")).strip()
+    if status != "revise" or not revised_answer:
+        return draft_answer
+    return revised_answer
+
+
+def extract_rag_evidence(
+    *,
+    settings: AppSettings,
+    query: str,
+    context: str,
+    coverage_requirements: str,
+) -> EvidenceExtractionResult:
+    if not context.strip() or context.strip() == "当前没有检索到可用上下文。":
+        return EvidenceExtractionResult(
+            facts_text="暂无可用证据事实。",
+            fact_count=0,
+            unknown_count=1,
+        )
+
+    model_name = settings.model.QUERY_REWRITE_MODEL.strip() or settings.model.DEFAULT_LLM_MODEL
+    try:
+        llm = build_chat_model(settings, model_name=model_name, temperature=0.0)
+        chain = RAG_EVIDENCE_EXTRACTION_PROMPT | llm | StrOutputParser()
+        raw_output = chain.invoke(
+            {
+                "query": query.strip(),
+                "coverage_requirements": coverage_requirements,
+                "context": context,
+            }
+        )
+    except Exception:
+        return EvidenceExtractionResult(
+            facts_text=context,
+            fact_count=0,
+            unknown_count=0,
+        )
+
+    payload = extract_json_payload(raw_output)
+    if not isinstance(payload, dict):
+        return EvidenceExtractionResult(
+            facts_text=context,
+            fact_count=0,
+            unknown_count=0,
+        )
+
+    facts = [str(item).strip() for item in payload.get("facts", []) if str(item).strip()]
+    unknown_points = [str(item).strip() for item in payload.get("unknown_points", []) if str(item).strip()]
+    lines: list[str] = []
+    if facts:
+        lines.append("已确认事实：")
+        lines.extend(f"{index}. {fact}" for index, fact in enumerate(facts, start=1))
+    if unknown_points:
+        lines.append("\n证据不足点：")
+        lines.extend(f"- {item}" for item in unknown_points)
+    facts_text = "\n".join(lines).strip() or context
+    return EvidenceExtractionResult(
+        facts_text=facts_text,
+        fact_count=len(facts),
+        unknown_count=len(unknown_points),
+    )
+
+
+def generate_answer_from_evidence(
+    *,
+    llm: object,
+    history: list[ChatMessage],
+    memory_section: str,
+    query: str,
+    coverage_requirements: str,
+    evidence_facts: str,
+) -> str:
+    chain = RAG_ANSWER_FROM_EVIDENCE_PROMPT | llm | StrOutputParser()
+    return chain.invoke(
+        {
+            "history": convert_history(history),
+            "memory_section": memory_section,
+            "query": query,
+            "coverage_requirements": coverage_requirements,
+            "evidence_facts": evidence_facts,
+        }
+    )
+
+
+def should_run_answer_completeness_review(
+    *,
+    query: str,
+    references: list[RetrievedReference],
+    coverage_requirements: str,
+    draft_answer: str,
+) -> bool:
+    if not references:
+        return False
+    if should_use_image_rag_prompt(query, references):
+        return False
+    if not draft_answer.strip():
+        return False
+    if coverage_requirements.strip():
+        return True
+
+    checklist_hints = ("哪些", "哪几", "分别", "同时", "以及", "角色", "原因", "措施", "步骤", "职责")
+    return any(hint in query for hint in checklist_hints)
+
+
+def compress_references_for_answer(
+    references: list[RetrievedReference],
+    *,
+    max_blocks: int = 4,
+    max_chars: int = 2200,
+) -> list[RetrievedReference]:
+    grouped: dict[str, list[RetrievedReference]] = {}
+    for ref in references:
+        sample_id = infer_reference_sample_id(ref)
+        key = sample_id or f"source:{ref.source_path or ref.source}"
+        grouped.setdefault(key, []).append(ref)
+
+    selected: list[RetrievedReference] = []
+    total_chars = 0
+    for _, group in sorted(
+        grouped.items(),
+        key=lambda item: max(ref.relevance_score for ref in item[1]),
+        reverse=True,
+    ):
+        for ref in dedupe_reference_group(group):
+            preview_len = len(build_reference_evidence_text(ref))
+            if selected and total_chars + preview_len > max_chars:
+                break
+            selected.append(ref)
+            total_chars += preview_len
+            if len(selected) >= max_blocks:
+                return selected
+        if len(selected) >= max_blocks or total_chars >= max_chars:
+            break
+    return selected or references[:max_blocks]
+
+
+def dedupe_reference_group(group: list[RetrievedReference]) -> list[RetrievedReference]:
+    best_by_fingerprint: dict[str, RetrievedReference] = {}
+    for ref in sorted(group, key=lambda item: item.relevance_score, reverse=True):
+        fingerprint = build_reference_fingerprint(ref)
+        existing = best_by_fingerprint.get(fingerprint)
+        if existing is None or is_reference_better(ref, existing):
+            best_by_fingerprint[fingerprint] = ref
+    return sorted(best_by_fingerprint.values(), key=lambda item: item.relevance_score, reverse=True)
+
+
+def is_reference_better(candidate: RetrievedReference, existing: RetrievedReference) -> bool:
+    if bool(candidate.evidence_summary) != bool(existing.evidence_summary):
+        return bool(candidate.evidence_summary)
+    candidate_len = len(build_reference_evidence_text(candidate))
+    existing_len = len(build_reference_evidence_text(existing))
+    if candidate_len != existing_len:
+        return candidate_len < existing_len
+    return candidate.relevance_score > existing.relevance_score
+
+
+def build_reference_fingerprint(ref: RetrievedReference) -> str:
+    base = ref.evidence_summary or ref.content_preview or ref.content or ""
+    normalized = normalize_text_for_fingerprint(base)
+    return normalized[:160] or ref.chunk_id
+
+
+def build_reference_evidence_text(ref: RetrievedReference) -> str:
+    if ref.evidence_summary:
+        return ref.evidence_summary.strip()
+    if ref.content_preview:
+        return ref.content_preview.strip()
+    return ref.content.strip()[:420]
+
+
+def normalize_text_for_fingerprint(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip().lower()
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", normalized)
+    return normalized
+
+
+def infer_reference_sample_id(ref: RetrievedReference) -> str:
+    for value in (ref.source_path, ref.chunk_id, ref.source):
+        for part in str(value or "").replace("\\", "/").split("/"):
+            if re.fullmatch(r"[0-9a-f]{24}", part, flags=re.IGNORECASE):
+                return part
+    return ""
+
+
+def count_coverage_requirements(text: str) -> int:
+    stripped = (text or "").strip()
+    if not stripped:
+        return 0
+    return sum(1 for line in stripped.splitlines() if re.match(r"^\d+\.\s", line.strip()))
 
 
 def grade_documents(
@@ -559,7 +987,7 @@ def resolve_reference_context_group(ref: RetrievedReference) -> str:
     return "text"
 
 
-def format_reference_block(index: int, ref: RetrievedReference) -> str:
+def format_reference_block(index: int, ref: RetrievedReference, *, compressed: bool = False) -> str:
     metadata_parts = [f"source={ref.source}"]
     if ref.page is not None:
         metadata_parts.append(f"page={ref.page}")
@@ -578,7 +1006,8 @@ def format_reference_block(index: int, ref: RetrievedReference) -> str:
         evidence_lines.append(f"ocr_text: {ref.ocr_text[:240]}")
     if ref.image_caption:
         evidence_lines.append(f"image_caption: {ref.image_caption[:240]}")
-    evidence_lines.append(f"content:\n{ref.content}")
+    body = build_reference_evidence_text(ref) if compressed else ref.content
+    evidence_lines.append(f"content:\n{body}")
     return "\n".join(evidence_lines)
 
 
@@ -589,6 +1018,11 @@ def append_answer_trace(
     references: list[RetrievedReference],
     prompt_kind: str,
     answer: str,
+    compressed_reference_count: int | None = None,
+    compressed_context_chars: int | None = None,
+    evidence_fact_count: int | None = None,
+    evidence_unknown_count: int | None = None,
+    coverage_requirement_count: int | None = None,
 ) -> None:
     source_modalities = count_reference_attribute(references, "source_modality")
     evidence_types = count_reference_attribute(references, "evidence_type")
@@ -614,6 +1048,11 @@ def append_answer_trace(
             "has_image_side_evidence": has_image_context,
             "has_joint_text_image_evidence": has_text_context and has_image_context,
             "has_multimodal_context": len([key for key, value in context_groups.items() if value > 0]) >= 2,
+            "compressed_reference_count": compressed_reference_count,
+            "compressed_context_chars": compressed_context_chars,
+            "evidence_fact_count": evidence_fact_count,
+            "evidence_unknown_count": evidence_unknown_count,
+            "coverage_requirement_count": coverage_requirement_count,
             "answer_preview": answer[:240],
         },
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
@@ -41,6 +42,7 @@ def rebuild_knowledge_base(
     embedding_model: str | None = None,
     enable_image_vlm_for_build: bool = False,
     force_full_rebuild: bool = False,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> RebuildKnowledgeBaseResult:
     effective_settings = build_rebuild_settings(
         settings,
@@ -62,6 +64,7 @@ def rebuild_knowledge_base(
         chunk_size=resolved_chunk_size,
         chunk_overlap=resolved_chunk_overlap,
         embedding_model=resolved_embedding_model,
+        progress_callback=progress_callback,
     )
     return result.model_copy(
         update={

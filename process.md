@@ -521,3 +521,34 @@
 ### 当前状态
 - `O2` 已完成。
 - `validate_phase7.py` 已具备当前环境下的离线完整回归能力，不再依赖外部模型网络可用性。
+
+## 2026-04-11 CRUD_RAG 同组聚合 rerank
+
+### 目标
+- 为 `crud_rag_3qa_60` 这类带 `sample_id` 分组的知识库增加“同组优先、异组抑制”的 hybrid rerank，压掉 `top_k` 尾部由重名 `news1/2/3.txt` 引入的跨样本噪声。
+
+### 实施内容
+- 更新 `app/retrievers/local_kb.py`：
+  - 新增 `sample_id` 推导辅助，优先读 metadata，缺失时从 `doc_id / relative_path / source_path` 中回退解析 24 位样本目录。
+  - 在 heuristic rerank 和 model rerank 后增加 `apply_same_sample_group_rerank_adjustments()`：
+    - 用组内 top-3 候选分数做聚合；
+    - 若存在强势主组，则对主组候选加分，对异组候选降分。
+  - 在 `diversify_candidates()` 前增加 `select_dominant_sample_group_candidates()`：
+    - 当主组数量和聚合优势足够明显时，只保留该 `sample_id` 组内候选，不再为了凑满 `top_k` 塞入异组长尾。
+
+### 验证结果
+- 重新跑单条 CRUD smoke：
+  - `python scripts/eval_crud_rag.py --knowledge-base-name crud_rag_3qa_60 --data-file data/eval/crud_rag_3qa_60_crud_rag_3qa_train.jsonl --tasks quest_answer --limit 1 --skip-generation --show-cases`
+  - 结果由原先 `5` 条引用收敛为同一 `sample_id` 的 `3` 条 `news1/2/3.txt`
+  - `context_char_f1` 从 `0.1859` 提升到 `0.2793`
+- 同条样本生成 smoke：
+  - `answer_char_f1` 提升到 `0.6537`
+  - `answer_rouge_l_f1` 提升到 `0.5696`
+- 最新 `retrieval_trace.jsonl` 显示：
+  - `bm25_index_available=true`
+  - `bm25_backend=rank_bm25`
+  - `final_reference_count=3`
+
+### 当前状态
+- CRUD 场景下的重名文件误判和异组长尾噪声已明显收敛。
+- 这版分组策略依赖 `sample_id` 或路径中可解析的样本目录；若后续要推广到更多数据集，最好把 `.rag_file_metadata.json` 正式并入 loader metadata。

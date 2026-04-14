@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -105,6 +106,9 @@ class BuildCachesResult:
     stage_timings: dict[str, float]
 
 
+ProgressCallback = Callable[[float, str], None]
+
+
 def rebuild_incremental_knowledge_base(
     *,
     settings: AppSettings,
@@ -114,6 +118,7 @@ def rebuild_incremental_knowledge_base(
     chunk_size: int,
     chunk_overlap: int,
     embedding_model: str,
+    progress_callback: ProgressCallback | None = None,
 ) -> RebuildKnowledgeBaseResult:
     total_started_at = perf_counter()
     stage_timings: dict[str, float] = {}
@@ -124,6 +129,11 @@ def rebuild_incremental_knowledge_base(
     chunk_cache_dir.mkdir(parents=True, exist_ok=True)
 
     started_at = perf_counter()
+    emit_progress(
+        progress_callback,
+        0.02,
+        f"[rebuild] 扫描知识库文件: {knowledge_base_name}",
+    )
     files = list_supported_files(content_dir, settings.kb.SUPPORTED_EXTENSIONS)
     stage_timings["scan_files"] = round(perf_counter() - started_at, 4)
     if not files:
@@ -132,6 +142,11 @@ def rebuild_incremental_knowledge_base(
             f"知识库目录中未找到可处理文件: {content_dir}\n"
             f"请将文档放入该目录后重试。支持格式: {supported}"
         )
+    emit_progress(
+        progress_callback,
+        0.08,
+        f"[rebuild] 已发现 {len(files)} 个可处理文件，开始规划重建方式",
+    )
 
     existing_manifest = load_build_manifest(manifest_path)
     started_at = perf_counter()
@@ -153,6 +168,14 @@ def rebuild_incremental_knowledge_base(
     files_rebuilt = len(rebuilt_plans)
     files_reused = len(reused_plans)
     files_deleted = len(deleted_entries)
+    emit_progress(
+        progress_callback,
+        0.16,
+        (
+            f"[rebuild] 重建计划完成: mode={index_mode}, "
+            f"重建 {files_rebuilt} 个文件, 复用 {files_reused} 个文件, 删除 {files_deleted} 个文件"
+        ),
+    )
 
     if index_mode == "reuse":
         started_at = perf_counter()
@@ -162,6 +185,7 @@ def rebuild_incremental_knowledge_base(
         elif not settings.kb.ENABLE_HYBRID_RETRIEVAL:
             delete_bm25_index(bm25_index_path)
         stage_timings["bm25_index_write"] = round(perf_counter() - started_at, 4)
+        emit_progress(progress_callback, 0.92, "[rebuild] 复用现有索引，正在写入 manifest")
         final_manifest = build_manifest_from_plans(
             knowledge_base_name=knowledge_base_name,
             plans=plans,
@@ -175,6 +199,7 @@ def rebuild_incremental_knowledge_base(
         write_build_manifest(manifest_path, final_manifest)
         stage_timings["manifest_write"] = round(perf_counter() - started_at, 4)
         stage_timings["total"] = round(perf_counter() - total_started_at, 4)
+        emit_progress(progress_callback, 1.0, "[rebuild] 重建完成")
         return RebuildKnowledgeBaseResult(
             knowledge_base_name=knowledge_base_name,
             content_dir=content_dir,
@@ -197,6 +222,7 @@ def rebuild_incremental_knowledge_base(
         )
 
     started_at = perf_counter()
+    emit_progress(progress_callback, 0.20, "[rebuild] 初始化 embedding 模型")
     assembler = EmbeddingAssembler(
         settings,
         chunk_size=chunk_size,
@@ -215,6 +241,7 @@ def rebuild_incremental_knowledge_base(
         chunk_overlap=chunk_overlap,
         chunk_cache_dir=chunk_cache_dir,
         embedding_model=embedding_model,
+        progress_callback=progress_callback,
     )
     rebuilt_outputs = build_caches_result.outputs
     stage_timings.update(build_caches_result.stage_timings)
@@ -224,6 +251,7 @@ def rebuild_incremental_knowledge_base(
 
     if index_mode == "append":
         started_at = perf_counter()
+        emit_progress(progress_callback, 0.88, "[rebuild] 追加写入向量索引")
         existing_records = load_metadata_records(metadata_path)
         new_chunk_entries = flatten_chunk_entries([cache for _, cache in rebuilt_outputs.values()])
         if new_chunk_entries:
@@ -246,6 +274,11 @@ def rebuild_incremental_knowledge_base(
         if not all_chunk_entries:
             raise ValueError(f"文档已加载，但未生成任何切片: {content_dir}")
         started_at = perf_counter()
+        emit_progress(
+            progress_callback,
+            0.88,
+            f"[rebuild] 构建完整向量索引，共 {len(all_chunk_entries)} 个 chunks",
+        )
         assembler.persist_entries(
             vector_store_dir=vector_store_dir,
             knowledge_name=knowledge_base_name,
@@ -257,9 +290,11 @@ def rebuild_incremental_knowledge_base(
         all_chunk_entries_for_bm25 = all_chunk_entries
 
     started_at = perf_counter()
+    emit_progress(progress_callback, 0.93, "[rebuild] 写入 metadata")
     write_metadata_records(metadata_path, metadata_records)
     stage_timings["metadata_write"] = round(perf_counter() - started_at, 4)
     started_at = perf_counter()
+    emit_progress(progress_callback, 0.96, "[rebuild] 写入 BM25 索引")
     if settings.kb.ENABLE_HYBRID_RETRIEVAL:
         write_bm25_index_for_chunk_entries(bm25_index_path, all_chunk_entries_for_bm25)
     else:
@@ -276,12 +311,14 @@ def rebuild_incremental_knowledge_base(
         rebuilt_outputs=rebuilt_outputs,
     )
     started_at = perf_counter()
+    emit_progress(progress_callback, 0.98, "[rebuild] 写入 build manifest 并清理缓存")
     write_build_manifest(manifest_path, final_manifest)
     stage_timings["manifest_write"] = round(perf_counter() - started_at, 4)
     started_at = perf_counter()
     cleanup_deleted_caches(chunk_cache_dir, deleted_entries)
     stage_timings["cache_cleanup"] = round(perf_counter() - started_at, 4)
     stage_timings["total"] = round(perf_counter() - total_started_at, 4)
+    emit_progress(progress_callback, 1.0, "[rebuild] 重建完成")
 
     return RebuildKnowledgeBaseResult(
         knowledge_base_name=knowledge_base_name,
@@ -403,6 +440,7 @@ def build_caches_for_plans(
     chunk_overlap: int,
     chunk_cache_dir: Path,
     embedding_model: str,
+    progress_callback: ProgressCallback | None = None,
 ) -> BuildCachesResult:
     if not plans:
         return BuildCachesResult(
@@ -418,24 +456,60 @@ def build_caches_for_plans(
         vector_store_type=settings.kb.DEFAULT_VS_TYPE,
     )
     started_at = perf_counter()
+    emit_progress(
+        progress_callback,
+        0.24,
+        f"[rebuild] 开始解析 {len(plans)} 个待重建文件",
+    )
     file_documents = assembler.load_paths(
         content_dir=content_dir,
         paths=[plan.snapshot.path for plan in plans],
         workers=settings.kb.DOC_PARSE_WORKERS,
+        progress_callback=lambda completed, total, relative_path: emit_file_stage_progress(
+            progress_callback,
+            start=0.24,
+            end=0.40,
+            stage_label="文档解析",
+            completed=completed,
+            total=total,
+            suffix=relative_path,
+        ),
     )
     document_load_seconds = round(perf_counter() - started_at, 4)
     chunk_batches: dict[str, list] = {}
     entries_by_owner: dict[str, list[VectorStoreEntry]] = {}
     started_at = perf_counter()
-    for plan in plans:
+    total_split_chunks = 0
+    for index, plan in enumerate(plans, start=1):
         documents = file_documents[plan.snapshot.relative_path]
         chunks, _ = assembler.split_loaded_documents(documents)
         chunk_batches[plan.snapshot.relative_path] = chunks
+        total_split_chunks += len(chunks)
+        emit_file_stage_progress(
+            progress_callback,
+            start=0.40,
+            end=0.56,
+            stage_label="文本切片",
+            completed=index,
+            total=len(plans),
+            suffix=f"{plan.snapshot.relative_path} | 累计 chunks={total_split_chunks}",
+        )
     text_split_seconds = round(perf_counter() - started_at, 4)
     started_at = perf_counter()
-    for plan in plans:
+    total_embedded_chunks = 0
+    for index, plan in enumerate(plans, start=1):
         entries_by_owner[plan.snapshot.relative_path] = assembler.embed_chunks(
             chunk_batches[plan.snapshot.relative_path]
+        )
+        total_embedded_chunks += len(chunk_batches[plan.snapshot.relative_path])
+        emit_file_stage_progress(
+            progress_callback,
+            start=0.56,
+            end=0.84,
+            stage_label="向量构建",
+            completed=index,
+            total=len(plans),
+            suffix=f"{plan.snapshot.relative_path} | 累计 embedded chunks={total_embedded_chunks}",
         )
     embedding_seconds = round(perf_counter() - started_at, 4) if chunk_batches else 0.0
     built: dict[str, tuple[BuildManifestEntry, FileChunkCache]] = {}
@@ -487,6 +561,46 @@ def build_caches_for_plans(
             "embedding": embedding_seconds,
         },
     )
+
+
+def emit_progress(
+    callback: ProgressCallback | None,
+    progress: float,
+    message: str,
+) -> None:
+    if callback is None:
+        return
+    callback(max(0.0, min(1.0, progress)), message)
+
+
+def emit_file_stage_progress(
+    callback: ProgressCallback | None,
+    *,
+    start: float,
+    end: float,
+    stage_label: str,
+    completed: int,
+    total: int,
+    suffix: str = "",
+) -> None:
+    if callback is None or total <= 0 or not should_emit_progress_update(completed, total):
+        return
+    fraction = completed / total
+    progress = start + (end - start) * fraction
+    message = f"[rebuild] {stage_label}: {completed}/{total}"
+    trimmed_suffix = suffix.strip()
+    if trimmed_suffix:
+        message += f" | {trimmed_suffix}"
+    emit_progress(callback, progress, message)
+
+
+def should_emit_progress_update(completed: int, total: int) -> bool:
+    if completed <= 1 or completed >= total:
+        return True
+    if total <= 20:
+        return True
+    interval = max(1, total // 20)
+    return completed % interval == 0
 
 
 def load_cached_caches_for_plans(

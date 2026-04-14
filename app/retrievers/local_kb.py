@@ -47,6 +47,11 @@ TEXT_QUERY_HINTS = (
     "参数",
     "配置",
 )
+SAMPLE_ID_PATTERN = re.compile(r"^[0-9a-f]{24}$", re.IGNORECASE)
+SAMPLE_GROUP_AGGREGATION_LIMIT = 3
+SAMPLE_GROUP_MIN_COUNT_FOR_RERANK = 2
+SAMPLE_GROUP_MIN_COUNT_FOR_TRIM = 3
+SAMPLE_GROUP_DOMINANCE_RATIO_FOR_TRIM = 0.15
 
 
 @dataclass
@@ -71,6 +76,14 @@ class QueryModalityProfile:
     preferred_extensions: tuple[str, ...]
     extension_bonus: dict[str, float]
     path_hint_terms: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SampleGroupStats:
+    sample_id: str
+    aggregate_score: float
+    max_score: float
+    candidate_count: int
 
 
 def search_local_knowledge_base(
@@ -572,6 +585,7 @@ def rerank_candidates(
             )
         reranked.append(candidate)
 
+    apply_same_sample_group_rerank_adjustments(reranked)
     reranked.sort(key=lambda item: item.rerank_score, reverse=True)
     cutoff = resolve_rerank_cutoff(settings, query_profile, top_k)
     return ensure_modality_coverage(
@@ -649,6 +663,8 @@ def heuristic_rerank_candidates(
         reranked.append(candidate)
 
     reranked.sort(key=lambda item: item.rerank_score, reverse=True)
+    apply_same_sample_group_rerank_adjustments(reranked)
+    reranked.sort(key=lambda item: item.rerank_score, reverse=True)
     cutoff = resolve_rerank_cutoff(settings, query_profile, top_k)
     return ensure_modality_coverage(
         reranked_candidates=reranked,
@@ -662,6 +678,13 @@ def diversify_candidates(
     target_count: int,
     query_profile: QueryModalityProfile,
 ) -> list[RetrievalCandidate]:
+    dominant_group_candidates = select_dominant_sample_group_candidates(
+        candidates,
+        target_count=target_count,
+    )
+    if dominant_group_candidates:
+        return dominant_group_candidates
+
     selected: list[RetrievalCandidate] = []
     reserve: list[RetrievalCandidate] = []
     seen_doc_ids: set[str] = set()
@@ -1029,6 +1052,30 @@ def get_document_doc_id(document: Document) -> str:
     return str(value or "")
 
 
+def get_document_sample_id(document: Document) -> str:
+    value = document.metadata.get("sample_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+
+    for key in ("doc_id", "relative_path", "source_path"):
+        candidate = infer_sample_id_from_text(document.metadata.get(key))
+        if candidate:
+            return candidate
+    return ""
+
+
+def infer_sample_id_from_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    parts = [part.strip() for part in re.split(r"[\\/]+", text) if part.strip()]
+    for part in reversed(parts):
+        if SAMPLE_ID_PATTERN.fullmatch(part):
+            return part
+    return ""
+
+
 def get_source_modality(document: Document) -> str:
     value = document.metadata.get("source_modality")
     if isinstance(value, str):
@@ -1121,6 +1168,109 @@ def ensure_modality_coverage(
         if len(selected) >= cutoff:
             break
     return selected[:cutoff]
+
+
+def apply_same_sample_group_rerank_adjustments(
+    candidates: list[RetrievalCandidate],
+) -> None:
+    group_stats = build_sample_group_stats(candidates)
+    if len(group_stats) < 2:
+        return
+
+    dominant_group = group_stats[0]
+    if dominant_group.candidate_count < SAMPLE_GROUP_MIN_COUNT_FOR_RERANK:
+        return
+
+    dominant_score = max(dominant_group.aggregate_score, 1e-6)
+    second_score = group_stats[1].aggregate_score if len(group_stats) > 1 else 0.0
+    dominance_ratio = max(0.0, (dominant_score - second_score) / dominant_score)
+    if dominance_ratio <= 0:
+        return
+
+    group_lookup = {item.sample_id: item for item in group_stats}
+    for candidate in candidates:
+        sample_id = get_document_sample_id(candidate.document)
+        if not sample_id:
+            continue
+
+        stats = group_lookup.get(sample_id)
+        if stats is None:
+            continue
+
+        group_ratio = stats.aggregate_score / dominant_score
+        count_bonus = 0.02 * min(max(stats.candidate_count - 1, 0), 2)
+        if sample_id == dominant_group.sample_id:
+            boost = 0.06 + 0.08 * group_ratio + count_bonus + 0.10 * dominance_ratio
+            candidate.rerank_score += boost
+            candidate.relevance_score = min(
+                1.0,
+                candidate.relevance_score + 0.04 + 0.06 * dominance_ratio,
+            )
+            continue
+
+        penalty = 0.04 + 0.08 * (1.0 - group_ratio) + 0.12 * dominance_ratio
+        candidate.rerank_score -= penalty
+        candidate.relevance_score = max(-0.25, candidate.relevance_score - penalty)
+
+
+def select_dominant_sample_group_candidates(
+    candidates: list[RetrievalCandidate],
+    *,
+    target_count: int,
+) -> list[RetrievalCandidate]:
+    if target_count < SAMPLE_GROUP_MIN_COUNT_FOR_TRIM:
+        return []
+
+    group_stats = build_sample_group_stats(candidates)
+    if len(group_stats) < 2:
+        return []
+
+    dominant_group = group_stats[0]
+    if dominant_group.candidate_count < min(SAMPLE_GROUP_MIN_COUNT_FOR_TRIM, target_count):
+        return []
+
+    dominant_score = max(dominant_group.aggregate_score, 1e-6)
+    second_score = group_stats[1].aggregate_score if len(group_stats) > 1 else 0.0
+    dominance_ratio = max(0.0, (dominant_score - second_score) / dominant_score)
+    if dominance_ratio < SAMPLE_GROUP_DOMINANCE_RATIO_FOR_TRIM:
+        return []
+
+    selected = [
+        item
+        for item in candidates
+        if get_document_sample_id(item.document) == dominant_group.sample_id
+    ]
+    return selected[:target_count]
+
+
+def build_sample_group_stats(
+    candidates: list[RetrievalCandidate],
+) -> list[SampleGroupStats]:
+    grouped_scores: dict[str, list[float]] = defaultdict(list)
+    for candidate in candidates:
+        sample_id = get_document_sample_id(candidate.document)
+        if not sample_id:
+            continue
+        grouped_scores[sample_id].append(max(float(candidate.rerank_score), 0.0))
+
+    stats: list[SampleGroupStats] = []
+    for sample_id, scores in grouped_scores.items():
+        if not scores:
+            continue
+        sorted_scores = sorted(scores, reverse=True)
+        stats.append(
+            SampleGroupStats(
+                sample_id=sample_id,
+                aggregate_score=sum(sorted_scores[:SAMPLE_GROUP_AGGREGATION_LIMIT]),
+                max_score=sorted_scores[0],
+                candidate_count=len(sorted_scores),
+            )
+        )
+    stats.sort(
+        key=lambda item: (item.aggregate_score, item.candidate_count, item.max_score),
+        reverse=True,
+    )
+    return stats
 
 
 def count_candidate_modalities(candidates: list[RetrievalCandidate]) -> dict[str, int]:
