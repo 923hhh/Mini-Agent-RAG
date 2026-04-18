@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -12,6 +13,56 @@ from app.utils.text import deduplicate_strings
 
 
 LIST_ITEM_PREFIX_PATTERN = re.compile(r"^(?:[-*]\s*|\d+[\.\)]\s*|[一二三四五六七八九十]+[、.]\s*)")
+YEAR_PATTERN = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+TEMPORAL_RECENCY_TERMS = (
+    "最新",
+    "当前",
+    "目前",
+    "现任",
+    "最近",
+    "今年",
+    "本年",
+    "本年度",
+)
+TEMPORAL_SLOT_PHRASES = (
+    "报名时间",
+    "截止时间",
+    "查询时间",
+    "开始时间",
+    "结束时间",
+    "工作时间",
+    "测试时间",
+    "发布时间",
+    "更新时间",
+    "录取时间",
+    "成绩查询",
+    "确认志愿",
+)
+TEMPORAL_KEYWORDS = (
+    "时间",
+    "日期",
+    "何时",
+    "什么时候",
+    "哪一年",
+    "哪年",
+    "几月",
+    "几号",
+    "截至",
+    "截止",
+    "开始",
+    "结束",
+    "报名",
+    "查询",
+)
+
+
+@dataclass(frozen=True)
+class TemporalConstraintProfile:
+    is_temporal: bool
+    explicit_years: tuple[str, ...]
+    recency_terms: tuple[str, ...]
+    slot_phrases: tuple[str, ...]
+    keep_keywords: tuple[str, ...]
 
 QUERY_REWRITE_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -20,6 +71,7 @@ QUERY_REWRITE_PROMPT = ChatPromptTemplate.from_messages(
             "你是企业级 RAG 系统的检索查询改写器。"
             "你的任务是把用户问题重写成更适合检索的短查询。"
             "必须保留专有名词、货号、型号、缩写、数字和关键约束。"
+            "如果问题涉及时间、年份、当前/最新、报名/截止/查询时间，必须保留这些时间条件，不得省略或泛化。"
             "不要回答问题，不要解释，只输出一行重写后的检索查询。",
         ),
         (
@@ -37,6 +89,7 @@ MULTI_QUERY_REWRITE_PROMPT = ChatPromptTemplate.from_messages(
             "你是企业级 RAG 系统的多查询规划器。"
             "你的任务是围绕同一个问题，生成若干条适合检索的短查询。"
             "必须保留专有名词、货号、型号、缩写、数字和关键约束。"
+            "如果原问题包含时间、年份、当前/最新、报名/截止/查询时间等约束，每一条查询都必须保留这些约束。"
             "至少覆盖两个角度："
             "1. 更适合检索的直接改写；"
             "2. 围绕可能答案关键词的补充检索。"
@@ -274,6 +327,9 @@ def normalize_candidate_query(text: str, original_query: str) -> str:
     cleaned = sanitize_rewritten_query(text)
     if not cleaned:
         return ""
+    cleaned = enforce_temporal_constraints(cleaned, original_query)
+    if not cleaned:
+        return ""
     if len(cleaned) > max(96, len(original_query) * 2):
         return ""
     return cleaned
@@ -292,6 +348,69 @@ def deduplicate_query_candidates(
         if normalized:
             queries.append(normalized)
     return deduplicate_strings(queries)[:limit]
+
+
+def enforce_temporal_constraints(candidate: str, original_query: str) -> str:
+    cleaned_candidate = candidate.strip()
+    cleaned_original = original_query.strip()
+    if not cleaned_candidate or not cleaned_original:
+        return cleaned_candidate
+
+    profile = build_temporal_constraint_profile(cleaned_original)
+    if not profile.is_temporal:
+        return cleaned_candidate
+
+    lowered_candidate = cleaned_candidate.lower()
+
+    for year in profile.explicit_years:
+        if year not in cleaned_candidate:
+            return ""
+
+    additions: list[str] = []
+    if profile.slot_phrases and not any(phrase in cleaned_candidate for phrase in profile.slot_phrases):
+        additions.append(profile.slot_phrases[0])
+
+    if profile.recency_terms and not any(term in cleaned_candidate for term in profile.recency_terms):
+        additions.append(profile.recency_terms[0])
+
+    for keyword in profile.keep_keywords:
+        if keyword in cleaned_candidate:
+            continue
+        if keyword.lower() in lowered_candidate:
+            continue
+        additions.append(keyword)
+        if len(additions) >= 2:
+            break
+
+    if additions:
+        merged = f"{cleaned_candidate} {' '.join(additions)}".strip()
+        return deduplicate_inline_terms(merged)
+    return cleaned_candidate
+
+
+def build_temporal_constraint_profile(query: str) -> TemporalConstraintProfile:
+    stripped = query.strip()
+    explicit_years = tuple(dict.fromkeys(match.group(1) for match in YEAR_PATTERN.finditer(stripped)))
+    recency_terms = tuple(term for term in TEMPORAL_RECENCY_TERMS if term in stripped)
+    slot_phrases = tuple(phrase for phrase in TEMPORAL_SLOT_PHRASES if phrase in stripped)
+    keep_keywords = tuple(keyword for keyword in TEMPORAL_KEYWORDS if keyword in stripped)
+    is_temporal = bool(explicit_years or recency_terms or slot_phrases or keep_keywords)
+    return TemporalConstraintProfile(
+        is_temporal=is_temporal,
+        explicit_years=explicit_years,
+        recency_terms=recency_terms,
+        slot_phrases=slot_phrases,
+        keep_keywords=keep_keywords,
+    )
+
+
+def deduplicate_inline_terms(text: str) -> str:
+    parts = [item.strip() for item in re.split(r"\s+", text.strip()) if item.strip()]
+    deduped: list[str] = []
+    for part in parts:
+        if part not in deduped:
+            deduped.append(part)
+    return " ".join(deduped)
 
 
 def sanitize_hypothetical_doc(text: str) -> str:

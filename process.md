@@ -552,3 +552,216 @@
 ### 当前状态
 - CRUD 场景下的重名文件误判和异组长尾噪声已明显收敛。
 - 这版分组策略依赖 `sample_id` 或路径中可解析的样本目录；若后续要推广到更多数据集，最好把 `.rag_file_metadata.json` 正式并入 loader metadata。
+
+## 2026-04-14 RAG 答案生成层第一轮优化
+
+### 目标
+- 先围绕 `factual_correctness` 偏低的问题，对非流式文本 RAG 做最小可验证的一轮结构优化。
+- 在不改外部 API schema、不触发知识库重建的前提下，提升答案对证据的依赖程度、减少证据冗余输入、降低模板化和答非所问现象。
+
+### 实施内容
+- 更新 `app/chains/rag.py`：
+  - 强化 `RAG_SYSTEM_PROMPT`：
+    - 明确要求“严格依据上下文作答”
+    - 禁止把相似事实当成目标答案
+    - 证据不足时必须明确说“根据当前检索到的内容，无法确定”
+    - 默认不输出“根据上下文/来源如下”等套话
+  - 新增非流式三段式生成链路：
+    - `RAG_EVIDENCE_EXTRACTION_PROMPT`
+    - `RAG_ANSWER_FROM_EVIDENCE_PROMPT`
+    - 现有 `RAG_COMPLETENESS_REVIEW_PROMPT` 继续保留，用于回答补漏
+  - `generate_rag_answer()` 改为：
+    - 先压缩参考证据
+    - 再抽取证据事实
+    - 再基于事实生成答案
+    - 最后做一次完整性复审
+  - `stream_rag_answer()` 保持现状，不接入三段式链路，仅补充上下文压缩观测信息
+  - `build_context()` 改成返回 `ContextBuildResult`，支持上下文压缩模式
+  - 新增证据压缩与去重辅助：
+    - `compress_references_for_answer()`
+    - `dedupe_reference_group()`
+    - `build_reference_fingerprint()`
+    - `infer_reference_sample_id()`
+    - 优先保留同题样本、`evidence_summary` 更明确且更短的证据块
+  - `format_reference_block()` 支持 `compressed=True`，压缩模式下优先使用 `evidence_summary / content_preview`
+  - `append_answer_trace()` 新增内部观测字段：
+    - `compressed_reference_count`
+    - `compressed_context_chars`
+    - `evidence_fact_count`
+    - `evidence_unknown_count`
+    - `coverage_requirement_count`
+  - `split_query_into_requirements()` 增加问号拆分，提升多问句场景的覆盖检查能力
+
+### 初步验证
+- `python -m py_compile app/chains/rag.py` 通过。
+- 本地最小 smoke 通过：
+  - `build_context(references, compress=True)` 能正常返回压缩后的上下文元信息
+  - `compress_references_for_answer()` 能正常工作
+- 尚未跑真实模型的 `CRUD 30` / `RAGAS 30` 回归，下一步需要用官方 split 知识库做正式评测确认收益。
+
+### 当前状态
+- 非流式文本 RAG 已切到“压缩证据 -> 抽取事实 -> 基于事实作答 -> 完整性复审”的第一版结构。
+- 流式回答链路暂未修改。
+- 是否对 `factual_correctness` 有实质提升，仍需以 `crud_rag_official_split_local` 上的 CRUD 30 / RAGAS 30 结果为准。
+
+### 回归评测结果（2026-04-14 晚）
+- 已跑官方 split 知识库 `crud_rag_official_split_local` 的两组正式回归：
+  - `python scripts/eval_crud_rag.py --knowledge-base-name crud_rag_official_split_local --data-file data/eval/crud_rag_official_split_local_official_split.jsonl --tasks quest_answer --limit 30 --output data/eval/crud_rag_official_split_local_questanswer_limit30_report_v2.json`
+  - `python scripts/eval_ragas.py --knowledge-base-name crud_rag_official_split_local --data-file data/eval/crud_rag_official_split_local_official_split.jsonl --tasks quest_answer --limit 30 --output data/eval/crud_rag_official_split_local_ragas_limit30_v2.json --batch-size 8`
+- CRUD 30 新结果：
+  - `answer_char_f1 = 0.1187`（旧基线 `0.3400`）
+  - `answer_rouge_l_f1 = 0.1113`（旧基线 `0.3037`）
+  - `answer_bleu_4 = 0.0462`（旧基线 `0.1711`）
+  - `retrieval_non_empty = 1.0`
+- RAGAS 30 新结果：
+  - `llm_context_recall = 1.0`（旧基线 `0.9667`）
+  - `faithfulness = 0.0167`（旧基线 `0.7221`）
+  - `factual_correctness = 0.0167`（旧基线 `0.4670`）
+  - `error_count = 0`
+
+### 问题定位
+- 新链路出现明显回归，已不满足 `优化方案.md` 第 7.4 节设定的验收下限。
+- 单条 debug case（`64fa9b27b82641eb8ecbe14c`）显示：
+  - 检索结果仍命中同一 `sample_id` 下的正确证据；
+  - 但最终答案直接退化为“根据当前检索到的内容，无法确定。”
+- 当前判断：问题不在检索，而在新增的“证据抽取 -> 基于事实作答”链路过于保守，导致模型在已有证据的情况下也倾向输出无法确定。
+
+### 下一步
+- 优先调试 `extract_rag_evidence()` 与 `RAG_ANSWER_FROM_EVIDENCE_PROMPT`：
+  - 检查证据抽取是否丢失关键信息；
+  - 检查生成 prompt 是否把“保守回退”权重设得过高；
+  - 必要时改为“抽取失败则回退原始压缩上下文直接回答”，避免整轮生成退化成统一拒答。
+
+### 修正后复测（2026-04-14 深夜）
+- 对 `generate_rag_answer()` 增加安全回退：
+  - 当证据抽取没有产出有效 facts 时，直接回退到“压缩上下文 + 原始 RAG prompt”生成；
+  - 当新链路输出空答案，或在弱 facts 场景下直接回成“无法确定”时，也回退到原始压缩上下文回答。
+- 单条 debug case（`64fa9b27b82641eb8ecbe14c`）恢复正常：
+  - 答案不再是“无法确定”
+  - `answer_char_f1 = 0.6061`
+  - `answer_rouge_l_f1 = 0.5859`
+- 重新跑 CRUD 30：
+  - 报告：`data/eval/crud_rag_official_split_local_questanswer_limit30_report_v3.json`
+  - `answer_char_f1 = 0.2452`
+  - `answer_rouge_l_f1 = 0.2142`
+  - `answer_bleu_4 = 0.1208`
+- 重新跑 RAGAS 30：
+  - 报告：`data/eval/crud_rag_official_split_local_ragas_limit30_v3.json`
+  - `llm_context_recall = 1.0`
+  - `faithfulness = 0.1178`
+  - `factual_correctness = 0.1410`
+
+### 当前判断
+- 回退保护已把“统一拒答”的严重问题修掉，但这版生成链路仍显著低于旧基线：
+  - 旧基线 CRUD 30：`answer_char_f1 = 0.3400`
+  - 当前 v3 CRUD 30：`answer_char_f1 = 0.2452`
+  - 旧基线 RAGAS 30：`factual_correctness = 0.4670`
+  - 当前 v3 RAGAS 30：`factual_correctness = 0.1410`
+- 说明“证据抽取 -> 基于事实作答”这条新链路虽然不再完全失效，但仍然在大批样本上损伤了答案质量。
+- 下一轮应优先考虑：
+  - 将证据抽取由“替代主回答链路”改成“辅助信号”
+  - 保留压缩上下文和复审，但让主回答重新基于压缩上下文直接生成
+  - 仅把抽取 facts 用于 completeness review 或 trace，而不是强绑定为唯一生成输入
+
+### 再次调整后复测（2026-04-15 凌晨）
+- 已将主回答链路改回“压缩上下文直接生成”，证据抽取仅作为 review 辅助输入，不再作为唯一回答输入。
+- 重新跑 CRUD 30：
+  - 报告：`data/eval/crud_rag_official_split_local_questanswer_limit30_report_v4.json`
+  - `answer_char_f1 = 0.2450`
+  - `answer_rouge_l_f1 = 0.1938`
+  - `answer_bleu_4 = 0.1121`
+  - `generation_metrics.evaluated_cases = 16`
+- 进一步用 `--limit 5 --show-cases` 排查：
+  - 报告：`data/eval/crud_rag_official_split_local_questanswer_limit5_debug_v4.json`
+  - 已确认未计入样本的主要原因不是新链路异常，而是模型接口报错：
+    - `Error code: 402`
+    - `Insufficient Balance`
+
+### 当前阻塞
+- 当前环境下，正式生成评测已受到 LLM provider 余额不足影响。
+- 因此：
+  - 现有 `v4` 结果只能作为“已成功生成的样本子集”参考；
+  - 不能把 `evaluated_cases = 16` 的 CRUD 30 结果直接与旧版完整 30 条基线做严格横向结论。
+
+## 2026-04-15 回退答案生成层实验链路
+
+### 目标
+- 回退 2026-04-14 引入的实验性“证据抽取 -> 基于事实作答”主回答链路，恢复到之前稳定的 RAG 主回答方式，避免继续拉低整体评测结果。
+
+### 实施内容
+- 更新 `app/chains/rag.py`：
+  - 删除 `RAG_EVIDENCE_EXTRACTION_PROMPT`
+  - 删除 `RAG_ANSWER_FROM_EVIDENCE_PROMPT`
+  - 删除 `ContextBuildResult` / `EvidenceExtractionResult`
+  - 删除证据抽取、压缩去重、review 拼接等实验性辅助函数
+  - `generate_rag_answer()` 恢复为：
+    - `build_rag_prompt()`
+    - `build_rag_variables()`
+    - `prompt | llm | StrOutputParser()`
+    - `maybe_refine_rag_answer()`
+  - `stream_rag_answer()` 恢复到实验前的常规链路
+  - `build_context()` 恢复为直接拼接原始 references 内容
+  - `append_answer_trace()` 恢复为不附加实验期观测字段
+  - `split_query_into_requirements()` 回退问号拆分扩展
+  - `RAG_SYSTEM_PROMPT` 与 `RAG_COMPLETENESS_REVIEW_PROMPT` 也一并恢复到实验前版本
+
+### 验证结果
+- `python -m py_compile app/chains/rag.py` 通过。
+
+### 当前状态
+- 代码已回退到实验前的稳定回答链路。
+- 若后续继续优化，应优先采用“可灰度、可回退”的小步方式，而不是再次把新链路直接替换为主回答链路。
+
+### 回退后验证
+- 基于回退后的代码重新运行：
+  - `python scripts/eval_crud_rag.py --knowledge-base-name crud_rag_official_split_local --data-file data/eval/crud_rag_official_split_local_official_split.jsonl --tasks quest_answer --limit 30 --output data/eval/crud_rag_official_split_local_questanswer_limit30_report_post_rollback.json`
+- 回退后 CRUD 30 结果：
+  - `answer_char_f1 = 0.3448`
+  - `answer_rouge_l_f1 = 0.3092`
+  - `answer_bleu_4 = 0.1739`
+  - `retrieval_non_empty = 1.0`
+  - `evaluated_cases = 30`
+- 与此前官方知识库稳定基线相比：
+  - 旧基线 `answer_char_f1 = 0.3400`
+  - 回退后 `answer_char_f1 = 0.3448`
+  - 旧基线 `answer_rouge_l_f1 = 0.3037`
+  - 回退后 `answer_rouge_l_f1 = 0.3092`
+- 结论：
+  - 回退后生成质量已恢复到稳定区间；
+  - 这轮实验性答案生成链路不保留为主链路；
+  - 当前代码状态以“回退后的稳定版本”为准。
+
+## 2026-04-15 Prompt 内部重复证据去重
+
+### 目标
+- 在不修改检索输出、不修改主回答链路的前提下，仅优化喂给模型的 prompt 内部上下文，压掉高度重复的 sibling 证据，验证是否能进一步提升生成质量。
+
+### 实施内容
+- 更新 `app/chains/rag.py`：
+  - 在 `build_context()` 前新增 `deduplicate_references_for_prompt()`
+  - 对 `evidence_summary / content_preview / content` 做轻量文本指纹去重
+  - 仅对 prompt 内部证据生效，外部 `references` 返回保持原样
+  - 当前去重后最多保留 `4` 条代表性证据
+
+### 验证结果
+- 小样本 `CRUD 10`：
+  - 报告：`data/eval/crud_rag_official_split_local_questanswer_limit10_prompt_dedupe.json`
+  - `answer_char_f1 = 0.3871`（旧 10 条基线 `0.3336`）
+  - `answer_rouge_l_f1 = 0.3669`（旧 10 条基线 `0.3125`）
+  - `answer_bleu_4 = 0.2070`（旧 10 条基线 `0.1697`）
+- 扩大到 `CRUD 30`：
+  - 报告：`data/eval/crud_rag_official_split_local_questanswer_limit30_prompt_dedupe.json`
+  - `answer_char_f1 = 0.3679`
+  - `answer_rouge_l_f1 = 0.3386`
+  - `answer_bleu_4 = 0.1921`
+  - `retrieval_non_empty = 1.0`
+
+### 对比结论
+- 与回退后的稳定基线相比：
+  - 基线 `answer_char_f1 = 0.3448`
+  - 去重后 `answer_char_f1 = 0.3679`
+  - 基线 `answer_rouge_l_f1 = 0.3092`
+  - 去重后 `answer_rouge_l_f1 = 0.3386`
+  - 基线 `answer_bleu_4 = 0.1739`
+  - 去重后 `answer_bleu_4 = 0.1921`
+- 说明“只优化 prompt 内部重复证据”是有效的小步改动，且未破坏检索侧稳定性。

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from math import ceil
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -47,11 +48,70 @@ TEXT_QUERY_HINTS = (
     "参数",
     "配置",
 )
+MULTI_DOC_QUERY_HINTS = (
+    "共同",
+    "分别",
+    "各自",
+    "区别",
+    "不同",
+    "相同",
+    "比较",
+    "相比",
+    "对比",
+    "优势",
+    "特点",
+    "目标",
+    "哪些专业",
+    "哪个专业",
+    "哪几个专业",
+)
+MULTI_DOC_CONNECTORS = (
+    "与",
+    "和",
+    "及",
+    "以及",
+    "、",
+)
 SAMPLE_ID_PATTERN = re.compile(r"^[0-9a-f]{24}$", re.IGNORECASE)
 SAMPLE_GROUP_AGGREGATION_LIMIT = 3
 SAMPLE_GROUP_MIN_COUNT_FOR_RERANK = 2
 SAMPLE_GROUP_MIN_COUNT_FOR_TRIM = 3
 SAMPLE_GROUP_DOMINANCE_RATIO_FOR_TRIM = 0.15
+TEMPORAL_QUERY_HINTS = (
+    "时间",
+    "日期",
+    "哪一年",
+    "哪年",
+    "何时",
+    "什么时候",
+    "几月",
+    "几号",
+    "多久",
+    "截至",
+    "截止",
+    "开始",
+    "结束",
+    "报名",
+    "查询",
+)
+TEMPORAL_RECENCY_HINTS = (
+    "最新",
+    "当前",
+    "目前",
+    "现任",
+    "最近",
+    "今年",
+    "本年",
+    "本年度",
+)
+YEAR_PATTERN = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+DATE_PATTERN = re.compile(
+    r"(?<!\d)((?:19|20)\d{2})\s*(?:-|/|\.|年)\s*(\d{1,2})\s*(?:-|/|\.|月)\s*(\d{1,2})\s*(?:日|号)?(?!\d)"
+)
+LABELED_DATE_PATTERN = re.compile(
+    r"(?:日期|发布时间|更新(?:时间)?|发布(?:时间)?)\s*[：: ]+\s*"
+    r"((?:19|20)\d{2})\s*(?:-|/|\.|年)\s*(\d{1,2})\s*(?:-|/|\.|月)\s*(\d{1,2})\s*(?:日|号)?"
+)
 
 
 @dataclass
@@ -84,6 +144,19 @@ class SampleGroupStats:
     aggregate_score: float
     max_score: float
     candidate_count: int
+
+
+@dataclass(frozen=True)
+class TemporalQueryProfile:
+    is_temporal: bool
+    prefers_recent: bool
+    explicit_years: tuple[int, ...]
+    explicit_dates: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class DiversityQueryProfile:
+    prefer_family_diversity: bool
 
 
 def search_local_knowledge_base(
@@ -284,6 +357,7 @@ def search_vector_store(
         filtered,
         target_count=top_k,
         query_profile=query_profile,
+        diversity_profile=infer_diversity_query_profile(query_bundle),
     )
     references = [
         candidate_to_reference(
@@ -323,6 +397,7 @@ def retrieve_candidates(
     dense_limit = max(top_k, settings.kb.HYBRID_DENSE_TOP_K)
     dense_queries = dense_query_bundle or query_bundle
     query_profile = query_profile or infer_query_modality_profile(query_bundle)
+    temporal_profile = infer_temporal_query_profile(query_bundle)
     modality_groups = group_documents_by_source_modality(all_documents)
     modality_grouped_dense_used = should_use_modality_grouped_dense_retrieval(
         modality_groups,
@@ -336,6 +411,9 @@ def retrieve_candidates(
                 "preferred_modalities": list(query_profile.preferred_modalities),
                 "preferred_extensions": list(query_profile.preferred_extensions),
                 "path_hint_terms": list(query_profile.path_hint_terms),
+                "temporal_query": temporal_profile.is_temporal,
+                "temporal_prefers_recent": temporal_profile.prefers_recent,
+                "temporal_explicit_years": list(temporal_profile.explicit_years),
                 "available_modalities": {
                     key: len(value) for key, value in modality_groups.items()
                 },
@@ -400,6 +478,7 @@ def retrieve_candidates(
 
     max_dense = max((item.dense_relevance for item in fused), default=1.0) or 1.0
     max_lexical = max((item.lexical_score for item in fused), default=1.0) or 1.0
+    temporal_adjustments = build_temporal_candidate_adjustments(fused, temporal_profile)
     for item in fused:
         score = 0.0
         if item.dense_rank is not None:
@@ -409,6 +488,7 @@ def retrieve_candidates(
         score += settings.kb.HYBRID_DENSE_SCORE_WEIGHT * (item.dense_relevance / max_dense)
         score += settings.kb.HYBRID_LEXICAL_SCORE_WEIGHT * (item.lexical_score / max_lexical)
         score += modality_bonus_for_candidate(item.document, query_profile)
+        score += temporal_adjustments.get(get_chunk_id(item.document), 0.0)
         item.fused_score = score
 
     if diagnostics is not None:
@@ -605,12 +685,14 @@ def heuristic_rerank_candidates(
         return []
 
     query_profile = infer_query_modality_profile(query_bundle)
+    temporal_profile = infer_temporal_query_profile(query_bundle)
     query_terms = build_match_terms(query_bundle)
     max_fused = max((item.fused_score for item in candidates), default=1.0) or 1.0
     max_dense = max((item.dense_relevance for item in candidates), default=1.0) or 1.0
     max_lexical = max((item.lexical_score for item in candidates), default=1.0) or 1.0
     normalized_queries = [normalize_search_text(item) for item in query_bundle if item.strip()]
     plain_queries = [item.lower().strip() for item in query_bundle if item.strip()]
+    temporal_adjustments = build_temporal_candidate_adjustments(candidates, temporal_profile)
 
     query_term_set = set(query_terms)
     reranked: list[RetrievalCandidate] = []
@@ -634,6 +716,7 @@ def heuristic_rerank_candidates(
         dense_component = candidate.dense_relevance / max_dense
         lexical_component = candidate.lexical_score / max_lexical
         modality_bonus = modality_bonus_for_candidate(candidate.document, query_profile)
+        temporal_bonus = temporal_adjustments.get(get_chunk_id(candidate.document), 0.0)
 
         if settings.kb.ENABLE_HEURISTIC_RERANK:
             candidate.rerank_score = (
@@ -645,10 +728,15 @@ def heuristic_rerank_candidates(
                 + 0.10 * normalized_bonus
                 + 0.04 * source_bonus
                 + modality_bonus
+                + temporal_bonus
             )
         else:
             candidate.rerank_score = (
-                0.55 * fused_component + 0.30 * dense_component + 0.15 * lexical_component + modality_bonus
+                0.55 * fused_component
+                + 0.30 * dense_component
+                + 0.15 * lexical_component
+                + modality_bonus
+                + temporal_bonus
             )
 
         candidate.relevance_score = min(
@@ -659,6 +747,10 @@ def heuristic_rerank_candidates(
             + 0.10 * phrase_bonus
             + 0.15 * normalized_bonus
             + 0.05 * source_bonus,
+        )
+        candidate.relevance_score = max(
+            -0.25,
+            min(1.0, candidate.relevance_score + temporal_bonus),
         )
         reranked.append(candidate)
 
@@ -677,6 +769,7 @@ def diversify_candidates(
     candidates: list[RetrievalCandidate],
     target_count: int,
     query_profile: QueryModalityProfile,
+    diversity_profile: DiversityQueryProfile,
 ) -> list[RetrievalCandidate]:
     dominant_group_candidates = select_dominant_sample_group_candidates(
         candidates,
@@ -684,6 +777,15 @@ def diversify_candidates(
     )
     if dominant_group_candidates:
         return dominant_group_candidates
+
+    if diversity_profile.prefer_family_diversity:
+        diversified_family_candidates = select_family_diverse_candidates(
+            candidates,
+            target_count=target_count,
+            query_profile=query_profile,
+        )
+        if diversified_family_candidates:
+            return diversified_family_candidates
 
     selected: list[RetrievalCandidate] = []
     reserve: list[RetrievalCandidate] = []
@@ -717,6 +819,72 @@ def diversify_candidates(
 
     for item in reserve:
         selected.append(item)
+        if len(selected) >= target_count:
+            break
+    return selected[:target_count]
+
+
+def select_family_diverse_candidates(
+    candidates: list[RetrievalCandidate],
+    *,
+    target_count: int,
+    query_profile: QueryModalityProfile,
+) -> list[RetrievalCandidate]:
+    selected: list[RetrievalCandidate] = []
+    reserve: list[RetrievalCandidate] = []
+    seen_doc_ids: set[str] = set()
+    seen_family_ids: set[str] = set()
+
+    required_modalities = resolve_required_modalities_for_query(query_profile)
+    for required_modality in required_modalities:
+        for item in candidates:
+            doc_id = get_document_doc_id(item.document)
+            family_id = get_document_family_id(item.document)
+            source_modality = get_source_modality(item.document)
+            if source_modality != required_modality:
+                continue
+            if doc_id and doc_id in seen_doc_ids:
+                continue
+            if family_id and family_id in seen_family_ids:
+                continue
+            selected.append(item)
+            if doc_id:
+                seen_doc_ids.add(doc_id)
+            if family_id:
+                seen_family_ids.add(family_id)
+            break
+        if len(selected) >= target_count:
+            return selected[:target_count]
+
+    for item in candidates:
+        doc_id = get_document_doc_id(item.document)
+        family_id = get_document_family_id(item.document)
+        if doc_id and doc_id in seen_doc_ids:
+            reserve.append(item)
+            continue
+        if family_id and family_id in seen_family_ids:
+            reserve.append(item)
+            continue
+        selected.append(item)
+        if doc_id:
+            seen_doc_ids.add(doc_id)
+        if family_id:
+            seen_family_ids.add(family_id)
+        if len(selected) >= target_count:
+            return selected[:target_count]
+
+    for item in candidates:
+        if item in selected or item in reserve:
+            continue
+        reserve.append(item)
+
+    for item in reserve:
+        doc_id = get_document_doc_id(item.document)
+        if doc_id and doc_id in seen_doc_ids:
+            continue
+        selected.append(item)
+        if doc_id:
+            seen_doc_ids.add(doc_id)
         if len(selected) >= target_count:
             break
     return selected[:target_count]
@@ -1043,6 +1211,163 @@ def normalize_search_text(text: str) -> str:
     return normalize_bm25_search_text(text)
 
 
+def infer_diversity_query_profile(query_bundle: list[str]) -> DiversityQueryProfile:
+    combined = " ".join(item.strip().lower() for item in query_bundle if item.strip())
+    connector_hits = sum(combined.count(connector) for connector in MULTI_DOC_CONNECTORS)
+    hint_hits = sum(1 for hint in MULTI_DOC_QUERY_HINTS if hint in combined)
+    prefer_family_diversity = hint_hits > 0 and connector_hits > 0
+    return DiversityQueryProfile(prefer_family_diversity=prefer_family_diversity)
+
+
+def infer_temporal_query_profile(query_bundle: list[str]) -> TemporalQueryProfile:
+    combined = " ".join(item.strip().lower() for item in query_bundle if item.strip())
+    explicit_years = tuple(sorted(set(extract_years_from_text(combined))))
+    explicit_dates = tuple(sorted(set(extract_date_ordinals_from_text(combined))))
+    prefers_recent = any(term in combined for term in TEMPORAL_RECENCY_HINTS)
+    is_temporal = (
+        prefers_recent
+        or bool(explicit_years)
+        or bool(explicit_dates)
+        or any(term in combined for term in TEMPORAL_QUERY_HINTS)
+    )
+    return TemporalQueryProfile(
+        is_temporal=is_temporal,
+        prefers_recent=prefers_recent,
+        explicit_years=explicit_years,
+        explicit_dates=explicit_dates,
+    )
+
+
+def build_temporal_candidate_adjustments(
+    candidates: list[RetrievalCandidate],
+    temporal_profile: TemporalQueryProfile,
+) -> dict[str, float]:
+    if not temporal_profile.is_temporal:
+        return {}
+
+    query_years = set(temporal_profile.explicit_years)
+    query_dates = set(temporal_profile.explicit_dates)
+    candidate_years: dict[str, set[int]] = {}
+    candidate_anchors: dict[str, int | None] = {}
+    anchor_values: list[int] = []
+
+    for candidate in candidates:
+        chunk_id = get_chunk_id(candidate.document)
+        text = build_search_text(candidate.document)
+        years = set(extract_years_from_text(text))
+        anchor = extract_document_temporal_anchor(candidate.document, fallback_text=text)
+        candidate_years[chunk_id] = years
+        candidate_anchors[chunk_id] = anchor
+        if anchor is not None:
+            anchor_values.append(anchor)
+
+    oldest_anchor = min(anchor_values) if anchor_values else None
+    newest_anchor = max(anchor_values) if anchor_values else None
+
+    adjustments: dict[str, float] = {}
+    for candidate in candidates:
+        chunk_id = get_chunk_id(candidate.document)
+        years = candidate_years.get(chunk_id, set())
+        anchor = candidate_anchors.get(chunk_id)
+        score = 0.0
+
+        if query_years:
+            overlap = len(years & query_years) / max(1, len(query_years))
+            if overlap > 0:
+                score += 0.08 + 0.08 * overlap
+            elif years:
+                score -= 0.05
+
+        if query_dates and anchor is not None:
+            if any(abs(anchor - query_date) <= 3 for query_date in query_dates):
+                score += 0.08
+
+        if temporal_profile.prefers_recent and anchor is not None:
+            if newest_anchor is not None and oldest_anchor is not None and newest_anchor > oldest_anchor:
+                recency = (anchor - oldest_anchor) / max(1, newest_anchor - oldest_anchor)
+                score += 0.10 * recency
+            else:
+                score += 0.04
+        elif anchor is not None:
+            score += 0.03
+        elif years:
+            score += 0.01
+        else:
+            score -= 0.02
+
+        adjustments[chunk_id] = score
+    return adjustments
+
+
+def extract_document_temporal_anchor(
+    document: Document,
+    *,
+    fallback_text: str = "",
+) -> int | None:
+    metadata_date = str(document.metadata.get("date", "")).strip()
+    if metadata_date:
+        ordinals = extract_date_ordinals_from_text(metadata_date)
+        if ordinals:
+            return max(ordinals)
+
+    text_candidates = [
+        str(document.metadata.get("title", "")).strip(),
+        str(document.metadata.get("section_title", "")).strip(),
+        str(document.metadata.get("source", "")).strip(),
+        document.page_content[:1200],
+        fallback_text[:1200],
+    ]
+    combined = "\n".join(item for item in text_candidates if item)
+    if not combined:
+        return None
+
+    labeled_ordinals = extract_date_ordinals_from_text(combined, prefer_labeled=True)
+    if labeled_ordinals:
+        return max(labeled_ordinals)
+
+    exact_ordinals = extract_date_ordinals_from_text(combined)
+    if exact_ordinals:
+        return max(exact_ordinals)
+
+    years = extract_years_from_text(combined)
+    if years:
+        return date(max(years), 12, 31).toordinal()
+    return None
+
+
+def extract_years_from_text(text: str) -> list[int]:
+    return [int(match.group(1)) for match in YEAR_PATTERN.finditer(str(text or ""))]
+
+
+def extract_date_ordinals_from_text(
+    text: str,
+    *,
+    prefer_labeled: bool = False,
+) -> list[int]:
+    source = str(text or "")
+    pattern = LABELED_DATE_PATTERN if prefer_labeled else DATE_PATTERN
+    ordinals: list[int] = []
+    for match in pattern.finditer(source):
+        ordinal = coerce_date_ordinal(
+            match.group(1),
+            match.group(2),
+            match.group(3),
+        )
+        if ordinal is not None:
+            ordinals.append(ordinal)
+    return ordinals
+
+
+def coerce_date_ordinal(year_text: str, month_text: str, day_text: str) -> int | None:
+    try:
+        year = int(year_text)
+        month = int(month_text)
+        day = int(day_text)
+        return date(year, month, day).toordinal()
+    except (TypeError, ValueError):
+        return None
+
+
 def get_chunk_id(document: Document, fallback: str = "") -> str:
     return str(document.metadata.get("chunk_id") or fallback)
 
@@ -1050,6 +1375,15 @@ def get_chunk_id(document: Document, fallback: str = "") -> str:
 def get_document_doc_id(document: Document) -> str:
     value = document.metadata.get("doc_id") or document.metadata.get("relative_path") or document.metadata.get("source")
     return str(value or "")
+
+
+def get_document_family_id(document: Document) -> str:
+    for key in ("reference_id", "url", "title", "source"):
+        value = str(document.metadata.get(key, "") or "").strip()
+        normalized = normalize_search_text(value)
+        if normalized:
+            return normalized
+    return ""
 
 
 def get_document_sample_id(document: Document) -> str:

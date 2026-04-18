@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.chains.rag import generate_rag_answer
 from app.retrievers.local_kb import search_local_knowledge_base
+from app.schemas.chat import ChatMessage
 from app.services.crud_eval_cases import (
     SUPPORTED_TASKS,
     build_cases,
@@ -49,6 +50,11 @@ def main() -> int:
         description="Evaluate the current local knowledge-base RAG with real RAGAS metrics on CRUD_RAG-style tasks."
     )
     parser.add_argument(
+        "--case-file",
+        default="",
+        help="Generic JSONL case file. Supports CRUD exported eval files and DomainRAG JSONL files.",
+    )
+    parser.add_argument(
         "--knowledge-base-name",
         required=True,
         help="Knowledge base name inside the current project.",
@@ -61,12 +67,12 @@ def main() -> int:
     parser.add_argument(
         "--data-file",
         default="",
-        help="Direct path to CRUD_RAG task data (JSON or JSONL). Overrides --crud-rag-root.",
+        help="Direct path to CRUD_RAG task data (JSON or JSONL). Ignored when --case-file is provided.",
     )
     parser.add_argument(
         "--tasks",
         nargs="+",
-        default=list(SUPPORTED_TASKS),
+        default=[],
         help="Tasks to evaluate. Supported: quest_answer summary",
     )
     parser.add_argument("--top-k", type=int, default=5, help="Retrieval top_k.")
@@ -121,16 +127,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    selected_tasks = normalize_tasks(args.tasks)
+    selected_tasks = normalize_tasks(args.tasks) if args.tasks else []
     metric_names = normalize_metric_names(
         args.metrics,
         include_response_relevancy=args.include_response_relevancy,
     )
-    data_path = resolve_data_file(args.data_file, args.crud_rag_root)
-    raw_items = load_crud_rag_items(data_path)
-    cases = build_cases(raw_items, selected_tasks)
-    if args.limit > 0:
-        cases = cases[: args.limit]
+    cases, data_path = load_eval_cases(
+        case_file=args.case_file,
+        data_file=args.data_file,
+        crud_rag_root=args.crud_rag_root,
+        selected_tasks=selected_tasks,
+        limit=args.limit,
+    )
 
     settings = load_settings(PROJECT_ROOT)
     summary = evaluate_cases_with_ragas(
@@ -184,6 +192,198 @@ def resolve_output_path(output: str, knowledge_base_name: str) -> Path:
             return (PROJECT_ROOT / path).resolve()
         return path
     return PROJECT_ROOT / "data" / "eval" / f"{knowledge_base_name}_ragas_report.json"
+
+
+def load_eval_cases(
+    *,
+    case_file: str,
+    data_file: str,
+    crud_rag_root: str,
+    selected_tasks: list[str],
+    limit: int,
+) -> tuple[list[dict[str, Any]], Path]:
+    if case_file.strip():
+        path = Path(case_file)
+        if not path.is_absolute():
+            path = (PROJECT_ROOT / path).resolve()
+        cases = load_generic_case_file(path, selected_tasks=selected_tasks, limit=limit)
+        return cases, path
+
+    if not selected_tasks:
+        selected_tasks = list(SUPPORTED_TASKS)
+    data_path = resolve_data_file(data_file, crud_rag_root)
+    raw_items = load_crud_rag_items(data_path)
+    cases = build_cases(raw_items, selected_tasks)
+    if limit > 0:
+        cases = cases[:limit]
+    return cases, data_path
+
+
+def load_generic_case_file(
+    path: Path,
+    *,
+    selected_tasks: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"评测文件不存在: {path}")
+
+    task_filter = set(selected_tasks) if selected_tasks else None
+    cases: list[dict[str, Any]] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        raw_case = json.loads(stripped)
+        case = normalize_generic_case(raw_case, source_path=path, line_number=line_number)
+        if case is None:
+            continue
+        if task_filter is not None and case["task"] not in task_filter:
+            continue
+        cases.append(case)
+        if limit > 0 and len(cases) >= limit:
+            break
+    return cases
+
+
+def normalize_generic_case(
+    raw_case: dict[str, Any],
+    *,
+    source_path: Path,
+    line_number: int,
+) -> dict[str, Any] | None:
+    if is_domainrag_case(raw_case):
+        return normalize_domainrag_case(raw_case, source_path=source_path, line_number=line_number)
+    return normalize_crud_export_case(raw_case, fallback_index=line_number)
+
+
+def is_domainrag_case(raw_case: dict[str, Any]) -> bool:
+    return "question" in raw_case and (
+        "positive_reference" in raw_case or "positive_references" in raw_case
+    )
+
+
+def normalize_domainrag_case(
+    raw_case: dict[str, Any],
+    *,
+    source_path: Path,
+    line_number: int,
+) -> dict[str, Any] | None:
+    question = str(raw_case.get("question", "")).strip()
+    # DomainRAG tasks are not fully uniform: most use `answers`, while
+    # multi-doc style samples often provide a single `answer` string.
+    gold_answer = extract_domainrag_gold_answer(raw_case.get("answers"))
+    if not gold_answer:
+        gold_answer = extract_domainrag_gold_answer(raw_case.get("answer"))
+    if not question or not gold_answer:
+        return None
+
+    case_id = str(raw_case.get("case_id", "")).strip()
+    if not case_id:
+        raw_id = raw_case.get("id")
+        case_id = str(raw_id).strip() if raw_id is not None else ""
+    if not case_id:
+        case_id = f"{source_path.stem}-{line_number}"
+
+    task_name = str(raw_case.get("domainrag_task", "")).strip() or source_path.parent.name or source_path.stem
+    history = build_domainrag_history(raw_case.get("history_qa"))
+    return {
+        "case_id": case_id,
+        "task": task_name,
+        "source_task": task_name,
+        "event": "",
+        "question": question,
+        "gold_answer": gold_answer,
+        "retrieval_query": question,
+        "generation_query": question,
+        "history": history,
+    }
+
+
+def normalize_crud_export_case(raw_case: dict[str, Any], *, fallback_index: int) -> dict[str, Any] | None:
+    task = str(raw_case.get("task", "")).strip().lower()
+    if task == "event_summary":
+        task = "summary"
+    source_task = str(raw_case.get("source_task", raw_case.get("task", task))).strip()
+    if task not in SUPPORTED_TASKS:
+        return None
+
+    case_id = str(raw_case.get("case_id", "")).strip() or f"{task}-{fallback_index:06d}"
+    event = str(raw_case.get("event", "")).strip()
+
+    if task == "summary":
+        gold_answer = coerce_text(raw_case.get("summary") or raw_case.get("answer"))
+        if not event or not gold_answer:
+            return None
+        retrieval_query = event
+        generation_query = f"请基于知识库检索内容，对以下事件写一段简洁摘要：\n{event}"
+        question = ""
+    else:
+        question = str(raw_case.get("question", raw_case.get("questions", ""))).strip()
+        gold_answer = coerce_text(raw_case.get("answer"))
+        if not question or not gold_answer:
+            return None
+        retrieval_query = f"{event}\n{question}".strip() if event else question
+        generation_query = f"事件背景：{event}\n\n问题：{question}" if event else question
+
+    return {
+        "case_id": case_id,
+        "task": task,
+        "source_task": source_task or task,
+        "event": event,
+        "question": question,
+        "gold_answer": gold_answer,
+        "retrieval_query": retrieval_query,
+        "generation_query": generation_query,
+        "history": [],
+    }
+
+
+def extract_domainrag_gold_answer(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, list):
+                for nested in item:
+                    text = str(nested).strip()
+                    if text:
+                        return text
+                continue
+            text = str(item).strip()
+            if text:
+                return text
+        return ""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def build_domainrag_history(value: Any) -> list[ChatMessage]:
+    history: list[ChatMessage] = []
+    if not isinstance(value, list):
+        return history
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question", "")).strip()
+        answer = extract_domainrag_gold_answer(item.get("answers"))
+        if question:
+            history.append(ChatMessage(role="user", content=question))
+        if answer:
+            history.append(ChatMessage(role="assistant", content=answer))
+    return history
+
+
+def coerce_text(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            text = str(item).strip()
+            if text:
+                return text
+        return ""
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def evaluate_cases_with_ragas(
@@ -291,6 +491,7 @@ def build_case_detail(
     top_k: int,
     score_threshold: float,
 ) -> dict[str, Any]:
+    history = list(case.get("history", []))
     base_detail: dict[str, Any] = {
         "case_id": case["case_id"],
         "task": case["task"],
@@ -298,6 +499,7 @@ def build_case_detail(
         "query": case["generation_query"],
         "retrieval_query": case["retrieval_query"],
         "gold_answer": case["gold_answer"],
+        "history_turns": len(history),
         "reference_count": 0,
         "top_sources": [],
         "top_references": [],
@@ -314,6 +516,7 @@ def build_case_detail(
             query=case["retrieval_query"],
             top_k=top_k,
             score_threshold=score_threshold,
+            history=history,
         )
     except Exception as exc:
         base_detail["status"] = "retrieval_error"
@@ -331,7 +534,7 @@ def build_case_detail(
             settings=settings,
             query=case["generation_query"],
             references=references,
-            history=[],
+            history=history,
         )
     except Exception as exc:
         base_detail["status"] = "generation_error"

@@ -36,5 +36,4 @@ class MarkdownKnowledge(BaseKnowledge):
             )
         ]
 
-
 __all__ = ["TextKnowledge", "MarkdownKnowledge"]
