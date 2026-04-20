@@ -1016,6 +1016,7 @@
     - `RERANK_MODEL_ANSWER_FOCUSED`
     - `RERANK_MODEL_MULTI_DOC`
     - `RERANK_MODEL_TEMPORAL`
+  - 其中 `RERANK_MODEL_MULTI_DOC` 与 `RERANK_MODEL_TEMPORAL` 的代码默认值回退为 `bge-reranker-base`，避免本地未跟踪配置文件缺失时路由失效。
 - 更新 `app/services/rerank_service.py`：
   - `rerank_texts()` 新增 `model_name_override` 参数，支持调用侧在运行时指定 reranker 模型。
 - 更新 `app/retrievers/local_kb.py`：

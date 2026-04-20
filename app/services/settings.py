@@ -133,8 +133,8 @@ class ModelSettings(BaseModel):
     DEFAULT_EMBEDDING_MODEL: str = "bge-m3:latest"
     RERANK_MODEL: str = "BAAI/bge-reranker-base"
     RERANK_MODEL_ANSWER_FOCUSED: str = ""
-    RERANK_MODEL_MULTI_DOC: str = ""
-    RERANK_MODEL_TEMPORAL: str = ""
+    RERANK_MODEL_MULTI_DOC: str = "BAAI/bge-reranker-base"
+    RERANK_MODEL_TEMPORAL: str = "BAAI/bge-reranker-base"
     RERANK_DEVICE: str = "cpu"
     AGENT_MODEL: str = "qwen2.5:7b"
     IMAGE_VLM_ENABLED: bool = False
