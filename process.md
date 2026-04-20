@@ -1109,3 +1109,49 @@
   - 图文联合证据
   - OCR 干扰样本
   - query rewrite drift 样本
+
+## 2026-04-20 Phase 0 第一版 Bad Case 分桶（20 条）
+
+### 目标
+- 基于刚建立的 `20` 条人工 gold 种子集，先做第一版检索 bad case 分桶。
+- 不再只看总均值，而是把失败样本拆成“召回、排序、chunk、跨段聚合”几类具体问题。
+
+### 实施内容
+- 新增脚本 `scripts/analyze_phase0_bad_cases.py`：
+  - 读取 `phase0_gold_manual_seed.jsonl`
+  - 对每条样本跑当前稳定检索链路，固定取 `top-50`
+  - 统计 `Recall@20 / Recall@50 / MRR@10 / NDCG@10 / Top1 accuracy`
+  - 生成第一版 bucket：
+    - `missed_recall`
+    - `low_rank`
+    - `chunk_noise`
+    - `cross_passage`
+    - `image_text_misaligned`
+- 产出：
+  - `data/eval/phase0_bad_case_bucket_v1.json`
+  - `data/eval/phase0_bad_case_bucket_v1.md`
+
+### 第一版分桶结果
+- 总样本数：`20`
+- `Recall@20 = 1.0000`
+- `Recall@50 = 1.0000`
+- `MRR@10 = 0.7380`
+- `NDCG@10 = 0.7908`
+- `Top1 accuracy = 0.6500`
+
+### bucket 统计
+- `passed`：`2`
+- `chunk_noise`：`4`
+- `low_rank`：`6`
+- `cross_passage`：`8`
+- `missed_recall`：`0`
+
+### 当前判断
+- 第一版人工集没有出现“完全召回不到”的样本，说明当前主问题已经不是召回深度，而是：
+  - `low_rank`：gold 文档在前 `20` 内，但排不到 `top1`
+  - `chunk_noise`：gold 文档排到了前面，但返回块没有直接承载答案句
+  - `cross_passage`：多文档/多段聚合问题仍是结构性短板
+- 这也说明后续优化优先级应继续放在：
+  - rerank 输入与排序质量
+  - chunk/答案句对齐
+  - cross-passage 聚合，而不是继续单纯拉召回

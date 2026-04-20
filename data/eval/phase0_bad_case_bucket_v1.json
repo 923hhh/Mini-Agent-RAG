@@ -1,0 +1,1122 @@
+{
+  "input_file": "E:\\南京航空航天大学\\aaa大创\\智能体案例\\Mini-Agent-RAG2\\data\\eval\\phase0_gold_manual_seed.jsonl",
+  "evaluated_total": 20,
+  "protocol": {
+    "top_k_retrieved": 50,
+    "reported_metrics": [
+      "Recall@20",
+      "Recall@50",
+      "MRR@10",
+      "NDCG@10",
+      "Top1 accuracy"
+    ]
+  },
+  "summary": {
+    "top1_accuracy": 0.65,
+    "recall_at_20": 1.0,
+    "recall_at_50": 1.0,
+    "mrr_at_10": 0.7379761904761905,
+    "ndcg_at_10": 0.7907932921959571,
+    "status_counts": {
+      "passed": 2,
+      "bad_case": 18
+    },
+    "bucket_counts": {
+      "passed": 2,
+      "chunk_noise": 4,
+      "low_rank": 6,
+      "cross_passage": 8
+    },
+    "question_type_counts": {
+      "parameter": 13,
+      "definition": 3,
+      "procedure": 4
+    }
+  },
+  "bucket_examples": {
+    "chunk_noise": [
+      "phase0-seed-domain-extractive-002",
+      "phase0-seed-domain-extractive-004",
+      "phase0-seed-domain-temporal-004",
+      "phase0-seed-domain-conversation-001"
+    ],
+    "low_rank": [
+      "phase0-seed-domain-extractive-003",
+      "phase0-seed-domain-extractive-005",
+      "phase0-seed-domain-extractive-006",
+      "phase0-seed-domain-temporal-001",
+      "phase0-seed-domain-temporal-002",
+      "phase0-seed-domain-temporal-003"
+    ],
+    "cross_passage": [
+      "phase0-seed-domain-multidoc-001",
+      "phase0-seed-domain-multidoc-002",
+      "phase0-seed-crud-001",
+      "phase0-seed-crud-002",
+      "phase0-seed-crud-003",
+      "phase0-seed-crud-004",
+      "phase0-seed-crud-005",
+      "phase0-seed-crud-006"
+    ]
+  },
+  "details": [
+    {
+      "case_id": "phase0-seed-domain-extractive-001",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "中国人民大学中法学院用哪三个语言进行教学？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "passed",
+      "assigned_failure_bucket": "",
+      "failure_bucket_reason": "当前检索结果已满足第一版人工集的 top1 / gold passage 命中要求。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        1
+      ],
+      "gold_passage_match_ranks_top5": [
+        1
+      ],
+      "gold_passage_match_ranks_top10": [
+        1
+      ],
+      "gold_passage_match_ranks_top20": [
+        1
+      ],
+      "top5_titles": [
+        "中法那些事儿",
+        "中法那些事儿",
+        "中法那些事儿",
+        "2020中法学院热点问题解答",
+        "2020中法学院热点问题解答"
+      ],
+      "top5_sources": [
+        "中法那些事儿__doc-1723__psg-ref3__7487bc76d19f.txt",
+        "中法那些事儿__doc-159__psg-7__af436beeccfc.txt",
+        "中法那些事儿__doc-159__psg-ref2__d1917bf4f46a.txt",
+        "2020中法学院热点问题解答__doc-1953__psg-ref5__d957046a0fe4.txt",
+        "2020中法学院热点问题解答__doc-325__psg-ref4__560557ed4184.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "中法那些事儿"
+      ],
+      "notes": "extractive 种子样本；由现有 DomainRAG 样本转为人工集，需人工复核 passage 边界。"
+    },
+    {
+      "case_id": "phase0-seed-domain-extractive-002",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "中国人民大学2018年高水平艺术团招生计划甲类的降分政策是降多少？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "chunk_noise",
+      "failure_bucket_reason": "gold 文档已排到前面，但 top-5 返回块里没有直接包含 gold passage，说明 chunk 噪声较大。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        1
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "中国人民大学2018年高水平艺术团招生简章",
+        "中国人民大学2018年高水平艺术团招生简章",
+        "中国人民大学本科招生章程（2018年实行）",
+        "中国人民大学2019年外语类保送生招生简章",
+        "中国人民大学2019年外语类保送生招生简章"
+      ],
+      "top5_sources": [
+        "中国人民大学2018年高水平艺术团招生简章__doc-158__psg-2__3e2c1286a6e7.txt",
+        "中国人民大学2018年高水平艺术团招生简章__doc-158__psg-ref4__ad0bcc89d212.txt",
+        "中国人民大学本科招生章程_2018年实行__doc-1289__psg-11__a509e6b418ff.txt",
+        "中国人民大学2019年外语类保送生招生简章__doc-277__psg-ref5__a732c3d94645.txt",
+        "中国人民大学2019年外语类保送生招生简章__doc-277__psg-8__231c509e5504.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "中国人民大学2018年高水平艺术团招生简章"
+      ],
+      "notes": "可用于检验答案句精确命中与数值/条件型抽取。"
+    },
+    {
+      "case_id": "phase0-seed-domain-extractive-003",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "在教育部开展的五次全国一级学科评估中，中国人民大学新闻传播学科被评为什么等级？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "low_rank",
+      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 6，未能稳定进入 top1。",
+      "top1_hit": false,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 0.16666666666666666,
+      "ndcg_at_10": 0.3562071871080222,
+      "rank_at_20": 6,
+      "rank_at_50": 6,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        6
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "传播学",
+        "传播学",
+        "新闻学",
+        "新闻学",
+        "新闻学院"
+      ],
+      "top5_sources": [
+        "传播学__doc-632__psg-ref6__8a7d05168a53.txt",
+        "传播学__doc-632__psg-0__16bb7221fca3.txt",
+        "新闻学__doc-610__psg-1__d1f17c2dc4b9.txt",
+        "新闻学__doc-610__psg-ref4__1948e50cab89.txt",
+        "新闻学院__doc-1955__psg-ref3__c85b32177a56.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "广播电视学"
+      ],
+      "notes": "适合做等级/标签类 parameter 样本。"
+    },
+    {
+      "case_id": "phase0-seed-domain-extractive-004",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "人大文学院的“古典学实验班”创办于哪一年？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "chunk_noise",
+      "failure_bucket_reason": "gold 文档已排到前面，但 top-5 返回块里没有直接包含 gold passage，说明 chunk 噪声较大。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        1
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "汉语言文学",
+        "汉语言",
+        "汉语言",
+        "中国人民大学文学院",
+        "汉语言"
+      ],
+      "top5_sources": [
+        "汉语言文学__doc-152__psg-5__5bbf5b4f0fd5.txt",
+        "汉语言__doc-1734__psg-ref5__a18b2958343e.txt",
+        "汉语言__doc-413__psg-ref4__cf649d44f03e.txt",
+        "中国人民大学文学院__doc-3279__psg-ref2__20225e822802.txt",
+        "汉语言__doc-413__psg-ref4__589f36e9d0cd.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "汉语言文学"
+      ],
+      "notes": "年份型抽取样本，适合验证句级命中能力。"
+    },
+    {
+      "case_id": "phase0-seed-domain-extractive-005",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "人大文学院举办的五届“世界汉学大会”开始时间是？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "low_rank",
+      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 4，未能稳定进入 top1。",
+      "top1_hit": false,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 0.25,
+      "ndcg_at_10": 0.43067655807339306,
+      "rank_at_20": 4,
+      "rank_at_50": 4,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        4
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "文学院",
+        "文学院",
+        "文学院",
+        "汉语言文学",
+        "中国人民大学文学院"
+      ],
+      "top5_sources": [
+        "文学院__doc-532__psg-ref4__bffd079a3fb1.txt",
+        "文学院__doc-165__psg-ref5__c9834d5f0bd8.txt",
+        "文学院__doc-165__psg-7__104fd8ecfe49.txt",
+        "汉语言文学__doc-152__psg-8__fd750fd79150.txt",
+        "中国人民大学文学院__doc-3279__psg-ref2__20225e822802.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "汉语言文学"
+      ],
+      "notes": "时间表达较短，适合人工核查是否存在更优 gold passage。"
+    },
+    {
+      "case_id": "phase0-seed-domain-extractive-006",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "国家专项计划招生的定向招收对象包括哪些地区的学生？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "low_rank",
+      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 3，未能稳定进入 top1。",
+      "top1_hit": false,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 0.3333333333333333,
+      "ndcg_at_10": 0.5,
+      "rank_at_20": 3,
+      "rank_at_50": 3,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        3
+      ],
+      "gold_passage_match_ranks_top5": [
+        3,
+        4,
+        5
+      ],
+      "gold_passage_match_ranks_top10": [
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "gold_passage_match_ranks_top20": [
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "top5_titles": [
+        "中国人民大学2022年国家专项计划和“圆梦计划”热点解答",
+        "中国人民大学2022年国家专项计划和“圆梦计划”热点解答",
+        "国家专项计划和“圆梦计划”热点解答",
+        "国家专项计划和“圆梦计划”热点解答",
+        "国家专项计划和“圆梦计划”热点解答"
+      ],
+      "top5_sources": [
+        "中国人民大学2022年国家专项计划和_圆梦计划_热点解答__doc-225__psg-ref4__9ff934feb1aa.txt",
+        "中国人民大学2022年国家专项计划和_圆梦计划_热点解答__doc-92__psg-ref5__c8f15bea097f.txt",
+        "国家专项计划和_圆梦计划_热点解答__doc-155__psg-ref4__1046d4f83116.txt",
+        "国家专项计划和_圆梦计划_热点解答__doc-1725__psg-ref2__cf70c25b05d6.txt",
+        "国家专项计划和_圆梦计划_热点解答__doc-155__psg-3__c184cec5ec83.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "国家专项计划和“圆梦计划”热点解答"
+      ],
+      "notes": "列表型答案样本，适合观察 listwise / top1 排序。"
+    },
+    {
+      "case_id": "phase0-seed-domain-temporal-001",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "中国人民大学的校长是谁？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "low_rank",
+      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 6，未能稳定进入 top1。",
+      "top1_hit": false,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 0.16666666666666666,
+      "ndcg_at_10": 0.3562071871080222,
+      "rank_at_20": 6,
+      "rank_at_50": 6,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        6
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和《社会建设》转隶座谈会在中国人民大学举行",
+        "新闻动态",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和《社会建设》转隶座谈会在中国人民大学举行",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和《社会建设》转隶座谈会在中国人民大学举行",
+        "李文海：历史离我们并不遥远"
+      ],
+      "top5_sources": [
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和_社会建设_转隶座谈会在中国人民大学举行__doc-2103__psg-ref3__20a85bbc17d7.txt",
+        "新闻动态__doc-3226__psg-ref4__fb6973412f62.txt",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和_社会建设_转隶座谈会在中国人民大学举行__doc-2103__psg-1__83e7c70fc289.txt",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和_社会建设_转隶座谈会在中国人民大学举行__doc-2103__psg-ref2__1001080df26c.txt",
+        "李文海_历史离我们并不遥远__doc-2381__psg-ref2__f50b46794d28.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "全国数字经济专业学位研究生教育指导委员会成立大会暨数字经济专硕人才培养工作会议举行"
+      ],
+      "notes": "时间敏感样本；需人工确认默认时间锚点为 2023 年末版本。"
+    },
+    {
+      "case_id": "phase0-seed-domain-temporal-002",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "中国人民大学校长是谁？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "low_rank",
+      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 5，未能稳定进入 top1。",
+      "top1_hit": false,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 0.2,
+      "ndcg_at_10": 0.38685280723454163,
+      "rank_at_20": 5,
+      "rank_at_50": 5,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        5
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和《社会建设》转隶座谈会在中国人民大学举行",
+        "新闻动态",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和《社会建设》转隶座谈会在中国人民大学举行",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和《社会建设》转隶座谈会在中国人民大学举行",
+        "李文海：历史离我们并不遥远"
+      ],
+      "top5_sources": [
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和_社会建设_转隶座谈会在中国人民大学举行__doc-2103__psg-ref3__20a85bbc17d7.txt",
+        "新闻动态__doc-3226__psg-ref4__fb6973412f62.txt",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和_社会建设_转隶座谈会在中国人民大学举行__doc-2103__psg-1__83e7c70fc289.txt",
+        "新发展阶段中国社会学学科建设研讨会暨中国人民大学人类学系揭牌和_社会建设_转隶座谈会在中国人民大学举行__doc-2103__psg-ref2__1001080df26c.txt",
+        "李文海_历史离我们并不遥远__doc-2381__psg-ref2__f50b46794d28.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "李文海：历史离我们并不遥远"
+      ],
+      "notes": "时间敏感样本；该题和当前版本问题相同，但 gold 依赖 1994 年时间语境。"
+    },
+    {
+      "case_id": "phase0-seed-domain-temporal-003",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "中国人民大学“圆梦计划”的招生人数是多少？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "low_rank",
+      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 7，未能稳定进入 top1。",
+      "top1_hit": false,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 0.14285714285714285,
+      "ndcg_at_10": 0.3333333333333333,
+      "rank_at_20": 7,
+      "rank_at_50": 7,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        7
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "中国人民大学2016年“圆梦计划”招生简章",
+        "中国人民大学2016年“圆梦计划”招生简章",
+        "中国人民大学2016年“圆梦计划”招生简章",
+        "中国人民大学2020年“圆梦计划” 招生简章",
+        "中国人民大学2016年“圆梦计划”招生简章"
+      ],
+      "top5_sources": [
+        "中国人民大学2016年_圆梦计划_招生简章__doc-286__psg-ref2__f9233ad7d755.txt",
+        "中国人民大学2016年_圆梦计划_招生简章__doc-153__psg-ref3__24f0b9aac183.txt",
+        "中国人民大学2016年_圆梦计划_招生简章__doc-650__psg-ref5__5401844c6165.txt",
+        "中国人民大学2020年_圆梦计划_招生简章__doc-285__psg-ref2__2231f2ec4601.txt",
+        "中国人民大学2016年_圆梦计划_招生简章__doc-153__psg-0__5904f01fcbe0.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "国家专项计划和“圆梦计划”热点解答"
+      ],
+      "notes": "时间敏感样本；需在 notes 中保留 2020 年时间锚点。"
+    },
+    {
+      "case_id": "phase0-seed-domain-temporal-004",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "中国人民大学音乐表演专业计划招生人数是多少？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "chunk_noise",
+      "failure_bucket_reason": "gold 文档已排到前面，但 top-5 返回块里没有直接包含 gold passage，说明 chunk 噪声较大。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        1
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "中国人民大学2018年艺术类（音乐表演）专业招生简章",
+        "中国人民大学2018年艺术类（音乐表演）专业招生简章",
+        "中国人民大学 2017年艺术类（音乐表演）专业招生简章",
+        "中国人民大学2016年艺术类（音乐表演）专业招生简章",
+        "中国人民大学2016年艺术类（音乐表演）专业招生简章"
+      ],
+      "top5_sources": [
+        "中国人民大学2018年艺术类_音乐表演_专业招生简章__doc-103__psg-ref3__2c1b53fc59d0.txt",
+        "中国人民大学2018年艺术类_音乐表演_专业招生简章__doc-103__psg-0__5e99be0f6ee8.txt",
+        "中国人民大学_2017年艺术类_音乐表演_专业招生简章__doc-93__psg-ref3__5b981ef53313.txt",
+        "中国人民大学2016年艺术类_音乐表演_专业招生简章__doc-173__psg-0__870bc0a903eb.txt",
+        "中国人民大学2016年艺术类_音乐表演_专业招生简章__doc-173__psg-ref3__0aeed18f1fa2.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "中国人民大学2018年艺术类（音乐表演）专业招生简章"
+      ],
+      "notes": "时间敏感样本；适合检验年份/计划类答案的排序稳定性。"
+    },
+    {
+      "case_id": "phase0-seed-domain-multidoc-001",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "数学与应用数学专业与数据计算及应用专业在人才培养的共同目标和独特特点是什么？",
+      "question_type": "definition",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 0.9197207891481876,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 2,
+      "matched_ranks_at_20": [
+        1,
+        3
+      ],
+      "gold_passage_match_ranks_top5": [
+        3
+      ],
+      "gold_passage_match_ranks_top10": [
+        3
+      ],
+      "gold_passage_match_ranks_top20": [
+        3
+      ],
+      "top5_titles": [
+        "数据计算及应用",
+        "数据计算及应用",
+        "数学与应用数学",
+        "计算机科学与技术",
+        "数学学院"
+      ],
+      "top5_sources": [
+        "数据计算及应用__doc-2009__psg-ref3__a1083aae37dd.txt",
+        "数据计算及应用__doc-661__psg-ref4__91ab18cc5b42.txt",
+        "数学与应用数学__doc-719__psg-3__25de8894c7be.txt",
+        "计算机科学与技术__doc-228__psg-ref3__48f5fb11f853.txt",
+        "数学学院__doc-694__psg-ref6__313f88abcfa2.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "数学与应用数学",
+        "数据计算及应用"
+      ],
+      "notes": "多文档样本；适合检验共同点总结和跨文档整合。"
+    },
+    {
+      "case_id": "phase0-seed-domain-multidoc-002",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "人工智能专业和计算机科学与技术专业在人才培养方面有何共同点和不同点？",
+      "question_type": "definition",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 2,
+      "matched_ranks_at_20": [
+        1,
+        2
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "计算机科学与技术",
+        "人工智能",
+        "高瓴人工智能学院",
+        "数据计算及应用",
+        "高瓴人工智能学院"
+      ],
+      "top5_sources": [
+        "计算机科学与技术__doc-228__psg-0__8a5d2ed2211e.txt",
+        "人工智能__doc-659__psg-0__206cabe4f59e.txt",
+        "高瓴人工智能学院__doc-640__psg-1__a8143d42d717.txt",
+        "数据计算及应用__doc-2009__psg-ref3__a1083aae37dd.txt",
+        "高瓴人工智能学院__doc-1702__psg-ref4__65fa1ad9b9d0.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "人工智能",
+        "计算机科学与技术"
+      ],
+      "notes": "多文档样本；适合检验差异点是否被正确抽取，而不是只做表面相似匹配。"
+    },
+    {
+      "case_id": "phase0-seed-domain-conversation-001",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "它成立于哪一年",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "bad_case",
+      "assigned_failure_bucket": "chunk_noise",
+      "failure_bucket_reason": "gold 文档已排到前面，但 top-5 返回块里没有直接包含 gold passage，说明 chunk 噪声较大。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        1
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "文学院",
+        "文学院",
+        "文学院",
+        "中国人民大学文学院",
+        "图书馆"
+      ],
+      "top5_sources": [
+        "文学院__doc-165__psg-0__4aa26b719e46.txt",
+        "文学院__doc-532__psg-ref3__674275822822.txt",
+        "文学院__doc-165__psg-ref4__7736d1b29472.txt",
+        "中国人民大学文学院__doc-3279__psg-ref2__20225e822802.txt",
+        "图书馆__doc-1594__psg-ref3__58b8d67d6622.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "文学院"
+      ],
+      "notes": "多轮样本；若不保留 history_qa，该 query 无法单独解释。"
+    },
+    {
+      "case_id": "phase0-seed-domain-conversation-002",
+      "source_dataset": "domainrag_small_batch_100",
+      "knowledge_base_name": "domainrag_small_batch_100",
+      "query": "汉语言专业在培育学生方面的侧重点是什么",
+      "question_type": "definition",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": true,
+      "needs_cross_passage_aggregation": false,
+      "status": "passed",
+      "assigned_failure_bucket": "",
+      "failure_bucket_reason": "当前检索结果已满足第一版人工集的 top1 / gold passage 命中要求。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 1,
+      "matched_ranks_at_20": [
+        1
+      ],
+      "gold_passage_match_ranks_top5": [
+        1
+      ],
+      "gold_passage_match_ranks_top10": [
+        1
+      ],
+      "gold_passage_match_ranks_top20": [
+        1
+      ],
+      "top5_titles": [
+        "文学院",
+        "汉语言",
+        "汉语言",
+        "文学院",
+        "国学院"
+      ],
+      "top5_sources": [
+        "文学院__doc-165__psg-3__ab5310081ecf.txt",
+        "汉语言__doc-413__psg-ref4__cf649d44f03e.txt",
+        "汉语言__doc-1734__psg-ref5__a18b2958343e.txt",
+        "文学院__doc-532__psg-ref3__674275822822.txt",
+        "国学院__doc-472__psg-ref5__5ecdc38f3157.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "文学院"
+      ],
+      "notes": "多轮样本；适合检查 history 保留、指代消解与最终定位能力。"
+    },
+    {
+      "case_id": "phase0-seed-crud-001",
+      "source_dataset": "crud_rag_3qa_full",
+      "knowledge_base_name": "crud_rag_3qa_full",
+      "query": "2023年7月28日，国家卫生健康委在全国范围内开展“启明行动”——防控儿童青少年近视健康促进活动，发布《防控儿童青少年近视核心知识十条》。\n在“启明行动”中，国家卫健委推广了哪些核心知识来预防儿童青少年近视，同时医疗机构和家长应承担哪些角色？",
+      "question_type": "procedure",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 0.9197207891481876,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 2,
+      "matched_ranks_at_20": [
+        1,
+        3
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "news2",
+        "news3",
+        "news1"
+      ],
+      "top5_sources": [
+        "news2.txt",
+        "news3.txt",
+        "news1.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "news1",
+        "news2"
+      ],
+      "notes": "CRUD cross-passage 样本；需人工确认是否还要补“家长角色”更完整表述。"
+    },
+    {
+      "case_id": "phase0-seed-crud-002",
+      "source_dataset": "crud_rag_3qa_full",
+      "knowledge_base_name": "crud_rag_3qa_full",
+      "query": "2023年7月28日，陕西西安市发放500万元体育类电子消费券，以激发市民参与健身活动。\n上海和成都市体育局都采取了哪些措施来促进体育消费，以及上海体育消费券的具体使用条件是什么？",
+      "question_type": "procedure",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 3,
+      "matched_ranks_at_20": [
+        1,
+        2,
+        3
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "news1",
+        "news3",
+        "news2"
+      ],
+      "top5_sources": [
+        "news1.txt",
+        "news3.txt",
+        "news2.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "news1",
+        "news2",
+        "news3"
+      ],
+      "notes": "适合标注跨城市、多约束条件整合场景。"
+    },
+    {
+      "case_id": "phase0-seed-crud-003",
+      "source_dataset": "crud_rag_3qa_full",
+      "knowledge_base_name": "crud_rag_3qa_full",
+      "query": "2023年7月29日，国家药监局公布了对牙科低压电动马达、贴敷类医疗器械等5个品种进行的产品质量监督抽检结果，共有12批（台）产品不符合标准规定。\n在最近的医疗器械产品质量抽检中，哪些具体产品不符合标准规定，这些产品分别由哪些企业生产？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 0.9197207891481876,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 2,
+      "matched_ranks_at_20": [
+        1,
+        3
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "news1",
+        "news2",
+        "news3"
+      ],
+      "top5_sources": [
+        "news1.txt",
+        "news2.txt",
+        "news3.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "news1",
+        "news3"
+      ],
+      "notes": "列表项较多，适合后续检验 recall 与 chunk_noise。"
+    },
+    {
+      "case_id": "phase0-seed-crud-004",
+      "source_dataset": "crud_rag_3qa_full",
+      "knowledge_base_name": "crud_rag_3qa_full",
+      "query": "2023年7月31日，江苏省中医院急诊科副主任、副主任中医师徐顺娟在大暑节气时期，提出大暑养生的关键在于养心阴和护脾气，并给出一系列夏季养生建议。\n在大暑期间，为了养“心阴”和护“脾气”，徐顺娟医生提出了哪些生活起居和饮食方面的建议？",
+      "question_type": "procedure",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": false,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 0.5,
+      "ndcg_at_10": 0.6934264036172708,
+      "rank_at_20": 2,
+      "rank_at_50": 2,
+      "matched_reference_count_at_20": 2,
+      "matched_ranks_at_20": [
+        2,
+        3
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "news2",
+        "news1",
+        "news3"
+      ],
+      "top5_sources": [
+        "news2.txt",
+        "news1.txt",
+        "news3.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "news1",
+        "news3"
+      ],
+      "notes": "适合标注 procedure + cross_passage；人工复核时建议补精确饮食建议句。"
+    },
+    {
+      "case_id": "phase0-seed-crud-005",
+      "source_dataset": "crud_rag_3qa_full",
+      "knowledge_base_name": "crud_rag_3qa_full",
+      "query": "2023年8月1日，国务院办公厅转发国家发展改革委的《关于恢复和扩大消费措施》的通知，指出稳定大宗消费，优化汽车购买使用管理，扩大新能源汽车消费。\n中国政府为推动新能源汽车消费和解决特定群体住房问题，实施了哪些措施，并如何确保这些措施能够帮助居民节约开支并提升福利？",
+      "question_type": "procedure",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 3,
+      "matched_ranks_at_20": [
+        1,
+        2,
+        3
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "news1",
+        "news2",
+        "news3"
+      ],
+      "top5_sources": [
+        "news1.txt",
+        "news2.txt",
+        "news3.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "news1",
+        "news2",
+        "news3"
+      ],
+      "notes": "政策类综合问答样本，适合检查跨段整合和答案覆盖。"
+    },
+    {
+      "case_id": "phase0-seed-crud-006",
+      "source_dataset": "crud_rag_3qa_full",
+      "knowledge_base_name": "crud_rag_3qa_full",
+      "query": "2023年8月2日，法国里昂大学和比利时布鲁塞尔自由大学的研究团队在《自然》杂志上发布了两项癌症研究突破，他们发现一种名为netrin-1的蛋白质在肿瘤发展中有重要作用，且阻断该蛋白能抑制癌症的生长和转移。\nnetrin-1蛋白在癌症治疗中的上调现象及其阻断剂NP137在实验中显示出的效果是什么？",
+      "question_type": "parameter",
+      "needs_image_evidence": false,
+      "answerable_from_single_chunk": false,
+      "needs_cross_passage_aggregation": true,
+      "status": "bad_case",
+      "assigned_failure_bucket": "cross_passage",
+      "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
+      "top1_hit": true,
+      "hit_at_20": true,
+      "hit_at_50": true,
+      "mrr_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "rank_at_20": 1,
+      "rank_at_50": 1,
+      "matched_reference_count_at_20": 2,
+      "matched_ranks_at_20": [
+        1,
+        2
+      ],
+      "gold_passage_match_ranks_top5": [],
+      "gold_passage_match_ranks_top10": [],
+      "gold_passage_match_ranks_top20": [],
+      "top5_titles": [
+        "news1",
+        "news3",
+        "news2"
+      ],
+      "top5_sources": [
+        "news1.txt",
+        "news3.txt",
+        "news2.txt"
+      ],
+      "top5_modalities": [
+        "text",
+        "text",
+        "text"
+      ],
+      "gold_document_labels": [
+        "news1",
+        "news3"
+      ],
+      "notes": "科研结果型 cross-passage 样本；适合观察事实抽取与证据整合。"
+    }
+  ]
+}
