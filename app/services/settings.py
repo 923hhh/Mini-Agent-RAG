@@ -39,7 +39,7 @@ class KBSettings(BaseModel):
     TEXT_SPLITTER_NAME: str = "ChineseRecursiveTextSplitter"
     CHUNK_SIZE: int = 800
     CHUNK_OVERLAP: int = 150
-    VECTOR_SEARCH_TOP_K: int = 4
+    VECTOR_SEARCH_TOP_K: int = 10
     SCORE_THRESHOLD: float = 0.5
     ENABLE_QUERY_REWRITE: bool = True
     ENABLE_MULTI_QUERY_RETRIEVAL: bool = True
@@ -55,9 +55,10 @@ class KBSettings(BaseModel):
     ENABLE_APPEND_INDEX: bool = True
     ENABLE_SMALL_TO_BIG_CONTEXT: bool = True
     ENABLE_MULTIMODAL_TRACE_LOG: bool = True
-    HYBRID_DENSE_TOP_K: int = Field(default=30, ge=1, le=100)
-    HYBRID_LEXICAL_TOP_K: int = Field(default=30, ge=1, le=100)
-    HYBRID_RERANK_TOP_K: int = Field(default=5, ge=1, le=50)
+    ENABLE_SENTENCE_INDEX: bool = True
+    HYBRID_DENSE_TOP_K: int = Field(default=50, ge=1, le=100)
+    HYBRID_LEXICAL_TOP_K: int = Field(default=50, ge=1, le=100)
+    HYBRID_RERANK_TOP_K: int = Field(default=10, ge=1, le=50)
     HYBRID_RRF_K: int = Field(default=60, ge=1, le=200)
     HYBRID_DENSE_SCORE_WEIGHT: float = Field(default=0.35, ge=0.0, le=2.0)
     HYBRID_LEXICAL_SCORE_WEIGHT: float = Field(default=0.25, ge=0.0, le=2.0)
@@ -70,9 +71,14 @@ class KBSettings(BaseModel):
     CORRECTIVE_WEB_SEARCH_TOP_K: int = Field(default=3, ge=1, le=8)
     CORRECTIVE_WEB_SEARCH_TIMEOUT_SECONDS: int = Field(default=12, ge=1, le=60)
     CORRECTIVE_WEB_SEARCH_SNIPPET_MAX_CHARS: int = Field(default=240, ge=80, le=800)
-    RERANK_CANDIDATES_TOP_N: int = Field(default=12, ge=1, le=50)
+    RERANK_CANDIDATES_TOP_N: int = Field(default=20, ge=1, le=50)
     RERANK_SCORE_THRESHOLD: float = Field(default=0.0, ge=0.0, le=1.0)
     RERANK_FALLBACK_TO_HEURISTIC: bool = True
+    SENTENCE_INDEX_TOP_K: int = Field(default=18, ge=1, le=100)
+    SENTENCE_INDEX_SCORE_WEIGHT: float = Field(default=0.12, ge=0.0, le=1.0)
+    SENTENCE_INDEX_MAX_SENTENCES_PER_CHUNK: int = Field(default=12, ge=1, le=64)
+    SENTENCE_INDEX_MIN_CHARS: int = Field(default=12, ge=1, le=200)
+    SENTENCE_INDEX_MAX_CHARS: int = Field(default=220, ge=40, le=1000)
     METADATA_FILTER_DENSE_FETCH_MULTIPLIER: int = Field(default=5, ge=1, le=20)
     TRACE_LOG_MAX_REFERENCES: int = Field(default=8, ge=1, le=20)
     EMBEDDING_BATCH_SIZE: int = Field(default=32, ge=1, le=512)
@@ -126,6 +132,9 @@ class ModelSettings(BaseModel):
     QUERY_REWRITE_MODEL: str = ""
     DEFAULT_EMBEDDING_MODEL: str = "bge-m3:latest"
     RERANK_MODEL: str = "BAAI/bge-reranker-base"
+    RERANK_MODEL_ANSWER_FOCUSED: str = ""
+    RERANK_MODEL_MULTI_DOC: str = ""
+    RERANK_MODEL_TEMPORAL: str = ""
     RERANK_DEVICE: str = "cpu"
     AGENT_MODEL: str = "qwen2.5:7b"
     IMAGE_VLM_ENABLED: bool = False

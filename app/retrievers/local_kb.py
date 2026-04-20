@@ -16,6 +16,7 @@ from app.services.embedding_service import build_embeddings
 from app.services.observability import append_jsonl_trace
 from app.services.query_rewrite_service import generate_hypothetical_doc, generate_multi_queries
 from app.services.rerank_service import RerankTextInput, rerank_texts
+from app.services.sentence_index_service import sentence_index_exists, resolve_sentence_index_dir
 from app.services.settings import AppSettings
 from app.services.temp_kb_service import ensure_temp_knowledge_available
 from app.storage.bm25_index import (
@@ -112,6 +113,53 @@ LABELED_DATE_PATTERN = re.compile(
     r"(?:日期|发布时间|更新(?:时间)?|发布(?:时间)?)\s*[：: ]+\s*"
     r"((?:19|20)\d{2})\s*(?:-|/|\.|年)\s*(\d{1,2})\s*(?:-|/|\.|月)\s*(\d{1,2})\s*(?:日|号)?"
 )
+ANSWER_NUMERIC_PATTERN = re.compile(
+    r"(?:\d+|[零一二三四五六七八九十百千万两〇]+)\s*(?:人|项|家|篇|分|个|所|名|种|门|届|年|月|日|级)"
+)
+ANSWER_GRADE_PATTERN = re.compile(r"(?:A\+|A-|A|B\+|B-|B|C\+|C-|C|甲类|乙类|丙类)", re.IGNORECASE)
+ANSWER_SEEKING_HINTS = (
+    "多少",
+    "几",
+    "哪一年",
+    "哪年",
+    "何时",
+    "什么时候",
+    "开始时间",
+    "什么时间",
+    "什么等级",
+    "哪三个",
+    "哪几",
+    "哪些",
+    "哪个",
+    "是什么",
+    "是怎样",
+    "理念",
+    "愿景",
+    "定位",
+    "目标",
+    "对象",
+    "政策",
+)
+ANSWER_LABEL_TERMS = (
+    "办学理念",
+    "办学愿景",
+    "发展定位",
+    "人才培养目标",
+    "降分政策",
+    "招生人数",
+    "招生计划",
+    "开始时间",
+    "招生对象",
+    "定向招收对象",
+    "办学目标",
+    "等级",
+)
+LIST_QUERY_HINTS = ("哪些", "哪三个", "哪几", "包括哪些")
+LANGUAGE_TERMS = ("汉语", "中文", "英语", "英文", "法语", "法文", "德语", "日语", "俄语")
+ANSWER_WINDOW_SPLIT_PATTERN = re.compile(r"(?:\r?\n+|[。！？!?；;])")
+RERANK_FIELD_MAX_CHARS = 80
+RERANK_SUMMARY_MAX_CHARS = 120
+RERANK_BODY_MAX_CHARS = 280
 
 
 @dataclass
@@ -120,6 +168,10 @@ class RetrievalCandidate:
     dense_rank: int | None = None
     dense_distance: float | None = None
     dense_relevance: float = 0.0
+    sentence_rank: int | None = None
+    sentence_distance: float | None = None
+    sentence_relevance: float = 0.0
+    sentence_text: str = ""
     lexical_rank: int | None = None
     lexical_score: float = 0.0
     fused_score: float = 0.0
@@ -157,6 +209,12 @@ class TemporalQueryProfile:
 @dataclass(frozen=True)
 class DiversityQueryProfile:
     prefer_family_diversity: bool
+
+
+@dataclass(frozen=True)
+class RerankModelSelection:
+    model_name: str
+    route: str
 
 
 def search_local_knowledge_base(
@@ -270,6 +328,18 @@ def search_vector_store(
         raise FileNotFoundError(
             f"知识库索引不存在: {vector_store_dir}\n{not_found_hint}"
         )
+    sentence_vector_store: BaseVectorStoreAdapter | None = None
+    if settings.kb.ENABLE_SENTENCE_INDEX and sentence_index_exists(
+        vector_store_dir,
+        settings.kb.DEFAULT_VS_TYPE,
+    ):
+        sentence_dir = resolve_sentence_index_dir(vector_store_dir)
+        sentence_vector_store = build_vector_store_adapter(
+            settings,
+            sentence_dir,
+            embeddings,
+            collection_name=f"{vector_store_dir.name}-sentence-index",
+        )
     all_documents = load_all_documents(vector_store)
     if not all_documents:
         return []
@@ -306,6 +376,7 @@ def search_vector_store(
     candidates = retrieve_candidates(
         settings=settings,
         vector_store=vector_store,
+        sentence_vector_store=sentence_vector_store,
         all_documents=filtered_documents,
         query_bundle=query_bundle,
         dense_query_bundle=dense_query_bundle,
@@ -336,6 +407,7 @@ def search_vector_store(
         query_bundle=query_bundle,
         query_profile=query_profile,
         top_k=top_k,
+        diagnostics=retrieval_diagnostics,
     )
     filtered = [item for item in reranked if item.relevance_score >= score_threshold]
     if not filtered:
@@ -384,6 +456,7 @@ def search_vector_store(
 def retrieve_candidates(
     settings: AppSettings,
     vector_store: BaseVectorStoreAdapter,
+    sentence_vector_store: BaseVectorStoreAdapter | None,
     all_documents: dict[str, Document],
     query_bundle: list[str],
     dense_query_bundle: list[str] | None,
@@ -418,6 +491,7 @@ def retrieve_candidates(
                     key: len(value) for key, value in modality_groups.items()
                 },
                 "modality_grouped_dense_used": modality_grouped_dense_used,
+                "sentence_index_available": sentence_vector_store is not None,
             }
         )
 
@@ -470,6 +544,20 @@ def retrieve_candidates(
                 lexical_limit=settings.kb.HYBRID_LEXICAL_TOP_K,
             )
 
+    sentence_index_used = False
+    if sentence_vector_store is not None and should_use_sentence_index(query_bundle):
+        collect_sentence_dense_candidates(
+            settings=settings,
+            sentence_vector_store=sentence_vector_store,
+            all_documents=all_documents,
+            query_bundle=query_bundle,
+            sentence_limit=max(top_k, settings.kb.SENTENCE_INDEX_TOP_K),
+            candidate_map=candidate_map,
+            metadata_filters=metadata_filters,
+            dense_fetch_multiplier=settings.kb.METADATA_FILTER_DENSE_FETCH_MULTIPLIER,
+        )
+        sentence_index_used = True
+
     fused = list(candidate_map.values())
     if not fused:
         if diagnostics is not None:
@@ -494,6 +582,7 @@ def retrieve_candidates(
     if diagnostics is not None:
         diagnostics["candidate_count"] = len(fused)
         diagnostics["candidate_modality_counts"] = count_candidate_modalities(fused)
+        diagnostics["sentence_index_used"] = sentence_index_used
 
     return fused
 
@@ -530,6 +619,53 @@ def collect_dense_candidates(
         candidate.dense_rank = rank
         candidate.dense_distance = raw_score
         candidate.dense_relevance = distance_to_relevance(raw_score)
+
+
+def collect_sentence_dense_candidates(
+    *,
+    settings: AppSettings,
+    sentence_vector_store: BaseVectorStoreAdapter,
+    all_documents: dict[str, Document],
+    query_bundle: list[str],
+    sentence_limit: int,
+    candidate_map: dict[str, RetrievalCandidate],
+    metadata_filters: MetadataFilters | None,
+    dense_fetch_multiplier: int,
+) -> None:
+    sentence_hits: dict[str, tuple[int, float, Document]] = {}
+    fetch_k = sentence_limit * max(1, dense_fetch_multiplier) if metadata_filters else sentence_limit
+    for dense_query in query_bundle:
+        docs_with_scores = sentence_vector_store.similarity_search_with_score(
+            dense_query,
+            k=sentence_limit,
+            metadata_filters=metadata_filters,
+            fetch_k=fetch_k,
+        )
+        for rank, (document, raw_score) in enumerate(docs_with_scores, start=1):
+            parent_chunk_id = str(document.metadata.get("parent_chunk_id", "") or "").strip()
+            if not parent_chunk_id or parent_chunk_id not in all_documents:
+                continue
+            previous = sentence_hits.get(parent_chunk_id)
+            if previous is None or raw_score < previous[1]:
+                sentence_hits[parent_chunk_id] = (rank, float(raw_score), document)
+
+    for rank, (parent_chunk_id, (_, raw_score, sentence_document)) in enumerate(
+        sorted(sentence_hits.items(), key=lambda item: item[1][1]),
+        start=1,
+    ):
+        candidate = candidate_map.get(parent_chunk_id)
+        if candidate is None:
+            continue
+        candidate.sentence_rank = rank
+        candidate.sentence_distance = raw_score
+        candidate.sentence_relevance = distance_to_relevance(raw_score)
+        sentence_text = str(
+            sentence_document.metadata.get("sentence_text")
+            or sentence_document.page_content
+            or ""
+        ).strip()
+        if sentence_text:
+            candidate.sentence_text = sentence_text
 
 
 def collect_lexical_candidates(
@@ -615,6 +751,7 @@ def rerank_candidates(
     query_bundle: list[str],
     query_profile: QueryModalityProfile,
     top_k: int,
+    diagnostics: dict[str, object] | None = None,
 ) -> list[RetrievalCandidate]:
     heuristic_ranked = heuristic_rerank_candidates(
         settings=settings,
@@ -626,10 +763,21 @@ def rerank_candidates(
         return []
 
     top_n = max(settings.kb.RERANK_CANDIDATES_TOP_N, top_k)
+    query_term_set = set(build_match_terms(query_bundle))
+    plain_queries = [item.lower().strip() for item in query_bundle if item.strip()]
+    primary_query = plain_queries[0] if plain_queries else ""
+    rerank_model_selection = resolve_rerank_model_selection(
+        settings=settings,
+        query_bundle=query_bundle,
+        query_profile=query_profile,
+    )
+    if diagnostics is not None:
+        diagnostics["rerank_model_selected"] = rerank_model_selection.model_name
+        diagnostics["rerank_model_route"] = rerank_model_selection.route
     rerank_inputs = [
         RerankTextInput(
             candidate_id=get_chunk_id(candidate.document),
-            text=build_search_text(candidate.document),
+            text=build_candidate_rerank_text(candidate.document, primary_query, query_term_set),
         )
         for candidate in heuristic_ranked[:top_n]
     ]
@@ -638,6 +786,7 @@ def rerank_candidates(
         query=query.strip(),
         items=rerank_inputs,
         top_n=top_n,
+        model_name_override=rerank_model_selection.model_name,
     )
     if not rerank_outcome.applied:
         if settings.kb.RERANK_FALLBACK_TO_HEURISTIC:
@@ -692,6 +841,7 @@ def heuristic_rerank_candidates(
     max_lexical = max((item.lexical_score for item in candidates), default=1.0) or 1.0
     normalized_queries = [normalize_search_text(item) for item in query_bundle if item.strip()]
     plain_queries = [item.lower().strip() for item in query_bundle if item.strip()]
+    primary_query = plain_queries[0] if plain_queries else ""
     temporal_adjustments = build_temporal_candidate_adjustments(candidates, temporal_profile)
 
     query_term_set = set(query_terms)
@@ -700,9 +850,26 @@ def heuristic_rerank_candidates(
         search_text = build_search_text(candidate.document)
         normalized_text = normalize_search_text(search_text)
         doc_terms = set(build_match_terms([search_text]))
+        page_text = str(candidate.document.page_content or "")
         overlap_ratio = (
             len(doc_terms & query_term_set) / len(query_term_set)
             if query_term_set
+            else 0.0
+        )
+        body_overlap_ratio = compute_body_overlap_ratio(page_text, query_term_set)
+        answer_window_text = build_answer_window_text(primary_query, page_text, query_term_set)
+        sentence_hint = candidate.sentence_text.strip()
+        preferred_answer_text = answer_window_text
+        if sentence_hint:
+            preferred_answer_text = (
+                f"{sentence_hint}\n{answer_window_text}"
+                if answer_window_text and answer_window_text != page_text
+                else sentence_hint
+            )
+            candidate.document.metadata["sentence_query_hit"] = sentence_hint
+        answer_window_overlap_ratio = (
+            compute_body_overlap_ratio(preferred_answer_text, query_term_set)
+            if preferred_answer_text and preferred_answer_text != page_text
             else 0.0
         )
         phrase_bonus = 1.0 if any(query_text and query_text in search_text.lower() for query_text in plain_queries) else 0.0
@@ -711,6 +878,7 @@ def heuristic_rerank_candidates(
         )
         source_text = f"{candidate.document.metadata.get('title', '')} {candidate.document.metadata.get('source', '')}".lower()
         source_bonus = 0.4 if any(term in source_text for term in query_terms if len(term) >= 2) else 0.0
+        answer_support_bonus = compute_answer_support_bonus(primary_query, preferred_answer_text)
 
         fused_component = candidate.fused_score / max_fused
         dense_component = candidate.dense_relevance / max_dense
@@ -724,9 +892,12 @@ def heuristic_rerank_candidates(
                 + 0.25 * dense_component
                 + 0.20 * lexical_component
                 + 0.10 * overlap_ratio
+                + 0.06 * body_overlap_ratio
+                + 0.05 * answer_window_overlap_ratio
                 + 0.06 * phrase_bonus
                 + 0.10 * normalized_bonus
                 + 0.04 * source_bonus
+                + answer_support_bonus
                 + modality_bonus
                 + temporal_bonus
             )
@@ -735,6 +906,9 @@ def heuristic_rerank_candidates(
                 0.55 * fused_component
                 + 0.30 * dense_component
                 + 0.15 * lexical_component
+                + 0.04 * body_overlap_ratio
+                + 0.04 * answer_window_overlap_ratio
+                + answer_support_bonus
                 + modality_bonus
                 + temporal_bonus
             )
@@ -744,9 +918,12 @@ def heuristic_rerank_candidates(
             candidate.dense_relevance
             + 0.22 * lexical_component
             + 0.18 * overlap_ratio
+            + 0.08 * body_overlap_ratio
+            + 0.08 * answer_window_overlap_ratio
             + 0.10 * phrase_bonus
             + 0.15 * normalized_bonus
-            + 0.05 * source_bonus,
+            + 0.05 * source_bonus
+            + 0.50 * answer_support_bonus,
         )
         candidate.relevance_score = max(
             -0.25,
@@ -1207,6 +1384,393 @@ def build_match_terms(texts: list[str], deduplicate: bool = True) -> list[str]:
     return build_bm25_match_terms(texts, deduplicate=deduplicate)
 
 
+def compute_body_overlap_ratio(page_text: str, query_term_set: set[str]) -> float:
+    if not query_term_set:
+        return 0.0
+    page_terms = set(build_match_terms([page_text]))
+    if not page_terms:
+        return 0.0
+    return len(page_terms & query_term_set) / len(query_term_set)
+
+
+def compute_answer_support_bonus(primary_query: str, page_text: str) -> float:
+    query = str(primary_query or "").strip().lower()
+    if not query or not any(hint in query for hint in ANSWER_SEEKING_HINTS):
+        return 0.0
+
+    text = str(page_text or "")
+    lowered = text.lower()
+    bonus = 0.0
+
+    matched_label_term = next((term for term in ANSWER_LABEL_TERMS if term in query), "")
+    if matched_label_term:
+        if any(
+            marker in lowered
+            for marker in (
+                f"{matched_label_term.lower()}：",
+                f"{matched_label_term.lower()}:",
+                f"{matched_label_term.lower()}是",
+                f"{matched_label_term.lower()}为",
+            )
+        ):
+            bonus += 0.06
+
+    if any(hint in query for hint in ("多少", "几", "几项", "几家", "几篇", "多少人", "招收多少", "降多少")):
+        if ANSWER_NUMERIC_PATTERN.search(text):
+            bonus += 0.05
+
+    if any(hint in query for hint in ("哪一年", "哪年", "何时", "什么时候", "开始时间", "什么时间")):
+        if extract_years_from_text(text) or extract_date_ordinals_from_text(text):
+            bonus += 0.05
+
+    if "等级" in query and ANSWER_GRADE_PATTERN.search(text):
+        bonus += 0.05
+
+    if "语言" in query:
+        language_hits = sum(1 for term in LANGUAGE_TERMS if term in text)
+        if language_hits >= 2:
+            bonus += 0.06
+
+    if any(hint in query for hint in LIST_QUERY_HINTS):
+        if any(separator in text for separator in ("、", "；", ";", "以及", "分别")):
+            bonus += 0.03
+
+    return min(0.14, bonus)
+
+
+def should_focus_answer_window(primary_query: str) -> bool:
+    query = str(primary_query or "").strip().lower()
+    if not query:
+        return False
+    return any(hint in query for hint in ANSWER_SEEKING_HINTS)
+
+
+def should_use_sentence_index(query_bundle: list[str]) -> bool:
+    primary_query = next((item.lower().strip() for item in query_bundle if item.strip()), "")
+    if not should_focus_answer_window(primary_query):
+        return False
+    if any(term in primary_query for term in TEMPORAL_QUERY_HINTS + TEMPORAL_RECENCY_HINTS):
+        return False
+    if any(hint in primary_query for hint in MULTI_DOC_QUERY_HINTS):
+        return False
+    connector_hits = sum(primary_query.count(connector) for connector in MULTI_DOC_CONNECTORS)
+    if connector_hits >= 2:
+        return False
+    if any(term in primary_query for term in ANSWER_LABEL_TERMS):
+        return True
+    if "语言" in primary_query:
+        return True
+    strong_extractive_hints = (
+        "多少",
+        "几",
+        "哪一年",
+        "哪年",
+        "何时",
+        "什么时候",
+        "开始时间",
+        "什么时间",
+        "什么等级",
+        "哪三个",
+        "哪几",
+        "哪些",
+        "哪个",
+    )
+    return any(hint in primary_query for hint in strong_extractive_hints)
+
+
+def build_candidate_rerank_text(
+    document: Document,
+    primary_query: str,
+    query_term_set: set[str],
+) -> str:
+    page_text = str(document.page_content or "")
+    sentence_hint = str(document.metadata.get("sentence_query_hit", "") or "").strip()
+    answer_window_text = build_answer_window_text(primary_query, page_text, query_term_set)
+    body_text = select_rerank_body_text(
+        primary_query=primary_query,
+        page_text=page_text,
+        query_term_set=query_term_set,
+        sentence_hint=sentence_hint,
+        answer_window_text=answer_window_text,
+    )
+
+    title = pick_rerank_title(document)
+    doc_type = infer_rerank_doc_type(document)
+    section_text = pick_rerank_section(document)
+    date_text = sanitize_rerank_text(document.metadata.get("date", ""), max_chars=32)
+    summary_text = pick_rerank_summary(document, page_text)
+    sentence_text = sanitize_rerank_text(sentence_hint, max_chars=RERANK_SUMMARY_MAX_CHARS)
+
+    lines: list[str] = []
+    if title:
+        lines.append(f"[标题] {title}")
+    if doc_type:
+        lines.append(f"[类型] {doc_type}")
+    if section_text:
+        lines.append(f"[章节] {section_text}")
+    if date_text:
+        lines.append(f"[日期] {date_text}")
+    if summary_text:
+        lines.append(f"[摘要] {summary_text}")
+    if sentence_text and sentence_text != body_text:
+        lines.append(f"[命中句] {sentence_text}")
+    if body_text:
+        lines.append(f"[正文] {body_text}")
+
+    if lines:
+        return "\n".join(lines)
+
+    return sanitize_rerank_text(page_text, max_chars=RERANK_BODY_MAX_CHARS)
+
+
+def pick_rerank_title(document: Document) -> str:
+    title = sanitize_rerank_text(document.metadata.get("title", ""), max_chars=RERANK_FIELD_MAX_CHARS)
+    if title:
+        return title
+    section_title = sanitize_rerank_text(document.metadata.get("section_title", ""), max_chars=RERANK_FIELD_MAX_CHARS)
+    if section_title:
+        return section_title
+    headers = extract_document_headers(document)
+    for value in headers.values():
+        candidate = sanitize_rerank_text(value, max_chars=RERANK_FIELD_MAX_CHARS)
+        if candidate:
+            return candidate
+    return ""
+
+
+def pick_rerank_section(document: Document) -> str:
+    section_path = sanitize_rerank_text(document.metadata.get("section_path", ""), max_chars=RERANK_SUMMARY_MAX_CHARS)
+    section_title = sanitize_rerank_text(document.metadata.get("section_title", ""), max_chars=RERANK_SUMMARY_MAX_CHARS)
+    title = sanitize_rerank_text(document.metadata.get("title", ""), max_chars=RERANK_SUMMARY_MAX_CHARS)
+    for candidate in (section_path, section_title):
+        if candidate and candidate != title:
+            return candidate
+    return ""
+
+
+def pick_rerank_summary(document: Document, page_text: str) -> str:
+    summary = sanitize_rerank_text(document.metadata.get("evidence_summary", ""), max_chars=RERANK_SUMMARY_MAX_CHARS)
+    title = sanitize_rerank_text(document.metadata.get("title", ""), max_chars=RERANK_SUMMARY_MAX_CHARS)
+    section_title = sanitize_rerank_text(document.metadata.get("section_title", ""), max_chars=RERANK_SUMMARY_MAX_CHARS)
+    if summary and summary not in {title, section_title}:
+        return summary
+    if not page_text:
+        return ""
+    return sanitize_rerank_text(page_text, max_chars=RERANK_SUMMARY_MAX_CHARS)
+
+
+def infer_rerank_doc_type(document: Document) -> str:
+    content_type = sanitize_rerank_text(document.metadata.get("content_type", ""), max_chars=48).lower()
+    source_modality = sanitize_rerank_text(document.metadata.get("source_modality", ""), max_chars=24).lower()
+
+    content_type_map = {
+        "document_text": "文档正文",
+        "image_evidence": "图像证据",
+        "image_region_evidence": "图像区域证据",
+        "instruction_text_evidence": "操作说明文本",
+        "instruction_parts_evidence": "零件清单",
+        "instruction_figure_evidence": "图示说明",
+        "instruction_arrow_evidence": "图示标注",
+        "web_search_result": "网络结果",
+    }
+    modality_map = {
+        "text": "文本证据",
+        "ocr": "OCR 文本",
+        "vision": "视觉描述",
+        "image": "图像内容",
+        "ocr+vision": "图文联合证据",
+    }
+
+    if content_type in content_type_map:
+        return content_type_map[content_type]
+    if source_modality in modality_map:
+        return modality_map[source_modality]
+    if content_type:
+        return content_type
+    if source_modality:
+        return source_modality
+    return "文本片段"
+
+
+def select_rerank_body_text(
+    *,
+    primary_query: str,
+    page_text: str,
+    query_term_set: set[str],
+    sentence_hint: str,
+    answer_window_text: str,
+) -> str:
+    focused_answer_text = ""
+    if answer_window_text and answer_window_text != page_text:
+        focused_answer_text = answer_window_text
+
+    focused_window_text = build_query_focused_window_text(
+        primary_query=primary_query,
+        page_text=page_text,
+        query_term_set=query_term_set,
+        max_chars=RERANK_BODY_MAX_CHARS,
+    )
+
+    body_text = focused_answer_text or focused_window_text or sanitize_rerank_text(
+        page_text,
+        max_chars=RERANK_BODY_MAX_CHARS,
+    )
+    sentence_text = sanitize_rerank_text(sentence_hint, max_chars=RERANK_SUMMARY_MAX_CHARS)
+    if sentence_text and sentence_text not in body_text:
+        combined = f"{sentence_text} {body_text}".strip()
+        return sanitize_rerank_text(combined, max_chars=RERANK_BODY_MAX_CHARS)
+    return body_text
+
+
+def build_query_focused_window_text(
+    *,
+    primary_query: str,
+    page_text: str,
+    query_term_set: set[str],
+    max_chars: int,
+) -> str:
+    text = str(page_text or "").strip()
+    if not text:
+        return ""
+
+    segments = split_answer_segments(text)
+    if not segments:
+        return sanitize_rerank_text(text, max_chars=max_chars)
+
+    scored_segments = [
+        (index, segment, score_rerank_segment(primary_query, segment, query_term_set))
+        for index, segment in enumerate(segments)
+    ]
+    best_index, _, best_score = max(scored_segments, key=lambda item: item[2], default=(-1, "", 0.0))
+    if best_index < 0:
+        return sanitize_rerank_text(text, max_chars=max_chars)
+    if best_score <= 0:
+        return sanitize_rerank_text(text, max_chars=max_chars)
+
+    selected_indices = {best_index}
+    current_length = len(segments[best_index])
+    left = best_index - 1
+    right = best_index + 1
+    score_map = {index: score for index, _, score in scored_segments}
+
+    while current_length < max_chars and (left >= 0 or right < len(segments)):
+        candidates: list[tuple[float, int]] = []
+        if left >= 0:
+            candidates.append((score_map.get(left, 0.0), left))
+        if right < len(segments):
+            candidates.append((score_map.get(right, 0.0), right))
+        if not candidates:
+            break
+        candidates.sort(key=lambda item: (item[0], -abs(item[1] - best_index)), reverse=True)
+        neighbor_score, neighbor_index = candidates[0]
+        if current_length >= 180 and neighbor_score <= 0:
+            break
+        neighbor_text = segments[neighbor_index]
+        projected_length = current_length + len(neighbor_text) + 1
+        if projected_length > max_chars and current_length >= 180:
+            break
+        selected_indices.add(neighbor_index)
+        current_length = projected_length
+        if neighbor_index == left:
+            left -= 1
+        elif neighbor_index == right:
+            right += 1
+
+    ordered_segments = [segments[index] for index in sorted(selected_indices)]
+    combined = " ".join(item for item in ordered_segments if item).strip()
+    return sanitize_rerank_text(combined or text, max_chars=max_chars)
+
+
+def score_rerank_segment(primary_query: str, segment: str, query_term_set: set[str]) -> float:
+    text = str(segment or "").strip()
+    if not text:
+        return 0.0
+    overlap_ratio = compute_body_overlap_ratio(text, query_term_set)
+    answer_support_bonus = compute_answer_support_bonus(primary_query, text)
+    return overlap_ratio + 0.8 * answer_support_bonus
+
+
+def sanitize_rerank_text(text: object, max_chars: int) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    compact = re.sub(r"\s+", " ", raw)
+    compact = compact.strip(" -:：|")
+    if len(compact) <= max_chars:
+        return compact
+    clipped = compact[: max(1, max_chars - 1)].rstrip()
+    return f"{clipped}…"
+
+
+def build_answer_window_text(
+    primary_query: str,
+    page_text: str,
+    query_term_set: set[str],
+    max_chars: int = 320,
+) -> str:
+    text = str(page_text or "").strip()
+    if not text or not should_focus_answer_window(primary_query):
+        return text
+
+    segments = split_answer_segments(text)
+    if not segments:
+        return text
+
+    scored_segments = [
+        (index, segment, score_answer_segment(primary_query, segment, query_term_set))
+        for index, segment in enumerate(segments)
+    ]
+    best_index, _, best_score = max(scored_segments, key=lambda item: item[2], default=(-1, "", 0.0))
+    if best_index < 0 or best_score < 0.08:
+        return text
+
+    selected_indices = {best_index}
+    current_length = len(segments[best_index])
+    left = best_index - 1
+    right = best_index + 1
+    score_map = {index: score for index, _, score in scored_segments}
+
+    while current_length < max_chars and (left >= 0 or right < len(segments)):
+        candidates: list[tuple[float, int]] = []
+        if left >= 0:
+            candidates.append((score_map.get(left, 0.0), left))
+        if right < len(segments):
+            candidates.append((score_map.get(right, 0.0), right))
+        if not candidates:
+            break
+        candidates.sort(key=lambda item: (item[0], -abs(item[1] - best_index)), reverse=True)
+        neighbor_score, neighbor_index = candidates[0]
+        neighbor_text = segments[neighbor_index]
+        if current_length >= 160 and neighbor_score <= 0:
+            break
+        projected_length = current_length + len(neighbor_text) + 1
+        if projected_length > max_chars and current_length >= 160:
+            break
+        selected_indices.add(neighbor_index)
+        current_length = projected_length
+        if neighbor_index == left:
+            left -= 1
+        elif neighbor_index == right:
+            right += 1
+
+    ordered_segments = [segments[index] for index in sorted(selected_indices)]
+    return "\n".join(item for item in ordered_segments if item).strip() or text
+
+
+def split_answer_segments(text: str) -> list[str]:
+    parts = [part.strip() for part in ANSWER_WINDOW_SPLIT_PATTERN.split(str(text or ""))]
+    return [part for part in parts if len(part) >= 2]
+
+
+def score_answer_segment(primary_query: str, segment: str, query_term_set: set[str]) -> float:
+    text = str(segment or "").strip()
+    if not text:
+        return 0.0
+    overlap_ratio = compute_body_overlap_ratio(text, query_term_set)
+    answer_support_bonus = compute_answer_support_bonus(primary_query, text)
+    return overlap_ratio + answer_support_bonus
+
+
 def normalize_search_text(text: str) -> str:
     return normalize_bm25_search_text(text)
 
@@ -1217,6 +1781,31 @@ def infer_diversity_query_profile(query_bundle: list[str]) -> DiversityQueryProf
     hint_hits = sum(1 for hint in MULTI_DOC_QUERY_HINTS if hint in combined)
     prefer_family_diversity = hint_hits > 0 and connector_hits > 0
     return DiversityQueryProfile(prefer_family_diversity=prefer_family_diversity)
+
+
+def resolve_rerank_model_selection(
+    settings: AppSettings,
+    query_bundle: list[str],
+    query_profile: QueryModalityProfile,
+) -> RerankModelSelection:
+    default_model = settings.model.RERANK_MODEL.strip()
+    primary_query = next((item.lower().strip() for item in query_bundle if item.strip()), "")
+    temporal_profile = infer_temporal_query_profile(query_bundle)
+    diversity_profile = infer_diversity_query_profile(query_bundle)
+    answer_focused_model = settings.model.RERANK_MODEL_ANSWER_FOCUSED.strip()
+    multi_doc_model = settings.model.RERANK_MODEL_MULTI_DOC.strip()
+    temporal_model = settings.model.RERANK_MODEL_TEMPORAL.strip()
+
+    if temporal_profile.is_temporal and temporal_model:
+        return RerankModelSelection(model_name=temporal_model, route="temporal")
+    if diversity_profile.prefer_family_diversity and multi_doc_model:
+        return RerankModelSelection(model_name=multi_doc_model, route="multi_doc")
+    if should_focus_answer_window(primary_query) and answer_focused_model:
+        return RerankModelSelection(model_name=answer_focused_model, route="answer_focused")
+    return RerankModelSelection(
+        model_name=default_model,
+        route=query_profile.query_type or "default",
+    )
 
 
 def infer_temporal_query_profile(query_bundle: list[str]) -> TemporalQueryProfile:
@@ -1665,6 +2254,8 @@ def append_retrieval_trace(
             "modality_grouped_dense_used": diagnostics.get("modality_grouped_dense_used", False),
             "candidate_count": diagnostics.get("candidate_count", 0),
             "candidate_modality_counts": diagnostics.get("candidate_modality_counts", {}),
+            "rerank_model_selected": diagnostics.get("rerank_model_selected", ""),
+            "rerank_model_route": diagnostics.get("rerank_model_route", ""),
             "final_reference_count": len(references),
             "final_source_modalities": count_reference_attributes(
                 references[: settings.kb.TRACE_LOG_MAX_REFERENCES],

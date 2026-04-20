@@ -35,6 +35,7 @@ def rerank_texts(
     query: str,
     items: list[RerankTextInput],
     top_n: int | None = None,
+    model_name_override: str | None = None,
 ) -> RerankOutcome:
     if not settings.kb.ENABLE_MODEL_RERANK:
         return RerankOutcome(
@@ -52,7 +53,7 @@ def rerank_texts(
             message="没有可供重排的候选。",
         )
 
-    model_name = settings.model.RERANK_MODEL.strip()
+    model_name = (model_name_override or settings.model.RERANK_MODEL).strip()
     if not model_name:
         return RerankOutcome(
             applied=False,

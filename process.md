@@ -1002,3 +1002,62 @@
 - 这轮实验已经证明：在当前 `Domain 100` 评测集上，`bge-reranker-v2-m3` 的整体排序能力优于当前 `bge-reranker-base`。
 - 这项收益主要集中在 `extractive_qa` 和 `structured_qa`，尤其对 `extractive_qa top1 / MRR` 的拉升比较明显。
 - 代价是 `multi-doc_qa` 和 `time-sensitive_qa` 的部分子指标出现回退，因此如果后续切换默认 reranker，仍建议结合任务结构继续观察，而不是只看总体均值。
+
+## 2026-04-20 按 Query Type 路由 Reranker 模型
+
+### 目标
+- 不再让所有问题都使用同一个 reranker 模型。
+- 基于前一轮对比结果，把 `extractive / structured` 更擅长的 `bge-reranker-v2-m3`，和 `multi-doc / time-sensitive` 更稳的 `bge-reranker-base` 组合起来使用。
+- 保持召回池、query rewrite、chunk 策略不变，只改 rerank 选模型逻辑。
+
+### 实施内容
+- 更新 `app/services/settings.py`：
+  - 新增 3 个可选配置项：
+    - `RERANK_MODEL_ANSWER_FOCUSED`
+    - `RERANK_MODEL_MULTI_DOC`
+    - `RERANK_MODEL_TEMPORAL`
+- 更新 `app/services/rerank_service.py`：
+  - `rerank_texts()` 新增 `model_name_override` 参数，支持调用侧在运行时指定 reranker 模型。
+- 更新 `app/retrievers/local_kb.py`：
+  - 新增 `RerankModelSelection`
+  - 新增 `resolve_rerank_model_selection()`
+  - 在 `rerank_candidates()` 中根据 query 类型选择 reranker：
+    - `temporal`：优先走 `RERANK_MODEL_TEMPORAL`
+    - `multi-doc`：优先走 `RERANK_MODEL_MULTI_DOC`
+    - `answer-focused`：优先走 `RERANK_MODEL_ANSWER_FOCUSED`
+    - 其他问题：走默认 `RERANK_MODEL`
+  - 将 `rerank_model_selected` 和 `rerank_model_route` 写入 retrieval trace，方便后续 bad case 分析。
+- 更新 `configs/model_settings.yaml`：
+  - 当前配置为：
+    - `RERANK_MODEL = ./data/models/bge-reranker-v2-m3`
+    - `RERANK_MODEL_ANSWER_FOCUSED = ./data/models/bge-reranker-v2-m3`
+    - `RERANK_MODEL_MULTI_DOC = ./data/models/bge-reranker-base`
+    - `RERANK_MODEL_TEMPORAL = ./data/models/bge-reranker-base`
+
+### 验证结果
+- 同一套 `Domain 100` 检索评测结果：
+  - `Recall@5 = 0.8700`
+  - `MRR = 0.7410`
+  - `NDCG@5 = 0.7445`
+  - `Top1 Hit = 0.6700`
+- 与“单一 reranker”对比：
+  - 相比 `v2-m3` 单模型：
+    - `MRR`: `0.7385 -> 0.7410`
+    - `NDCG@5`: `0.7441 -> 0.7445`
+    - `Top1 Hit`: `0.6600 -> 0.6700`
+  - 相比 `base` 单模型：
+    - `MRR`: `0.7373 -> 0.7410`
+    - `NDCG@5`: `0.7369 -> 0.7445`
+    - `Top1 Hit`: 持平 `0.6700`
+- 分任务变化：
+  - `multi-doc_qa` 明显恢复：
+    - `MRR = 0.9750`
+    - `NDCG@5 = 0.8389`
+  - `time-sensitive_qa` 也比 `v2-m3` 单模型更稳：
+    - `MRR = 0.3158`
+    - `NDCG@5 = 0.3733`
+  - `extractive_qa` 没有保持到 `v2-m3` 单模型时的最高值，但整体组合后的全局指标更优。
+
+### 当前状态
+- 这轮“按 query type 路由 reranker”已保留到主链路。
+- 当前判断是：在不重构召回和 chunk 的前提下，这种“默认模型 + 题型覆盖”的方式，比强行统一使用同一个 reranker 更稳。
