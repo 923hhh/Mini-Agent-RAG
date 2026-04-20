@@ -765,3 +765,240 @@
   - 基线 `answer_bleu_4 = 0.1739`
   - 去重后 `answer_bleu_4 = 0.1921`
 - 说明“只优化 prompt 内部重复证据”是有效的小步改动，且未破坏检索侧稳定性。
+
+## 2026-04-17 CRUD / Domain 评测链路扩展与老师材料整理
+
+### 目标
+- 把现有检索评测从“只看有没有召回到”扩展为“同时看排序质量”，补齐 `MRR / NDCG`。
+- 让评测脚本能够直接吃 `DomainRAG` 标注集，并支持后续的 `CRUD vs Domain` 对比。
+- 补齐老师可直接阅读的综合文档、案例文档和技术说明文档。
+
+### 实施内容
+- 更新 `scripts/eval_retrieval.py`：
+  - 支持直接读取 `DomainRAG` 原始 `jsonl`
+  - 支持 `history_qa`
+  - 支持单正例与多正例 `positive_reference / positive_references`
+  - 正式输出 `Recall@k / MRR / NDCG@k`
+- 新增 `scripts/import_domainrag_kb.py`：
+  - 支持把 `DomainRAG` 的 `positive_reference`、`retrieved_psgs` 等代理语料导入为本地知识库
+  - 支持按任务类型做小批量实验导入
+- 新增 `scripts/build_crud_retrieval_cases.py`：
+  - 基于当前 CRUD 知识库生成与本地文件一一对齐的检索评测集
+- 更新 `scripts/eval_ragas.py`：
+  - 支持通用 `jsonl`
+  - 支持 `DomainRAG` 自动转换
+  - 支持对话历史传入
+  - 补齐 `llm_context_recall / faithfulness / factual_correctness / response_relevancy`
+- 整理老师查看用文档：
+  - `data/eval/crud_domain_benchmark_combined.md`
+  - `data/eval/crud_domain_casebook.md`
+  - `RAG_core_tech_notes.md`
+  - `RAG评测与技术综合说明-2026-04-17.md`
+
+### 验证结果
+- `DomainRAG` 小批量知识库导入与检索评测链路可用，先后完成了 `15 / 50 / 100` 条样本的检索评测。
+- `CRUD 100 vs Domain 100` 检索对比可稳定运行：
+  - `CRUD 100`：`Recall@5 = 1.0000`，`MRR = 1.0000`，`NDCG@5 = 1.0000`
+  - `Domain 100`：`Recall@5 = 0.8000`，`MRR = 0.6262`，`NDCG@5 = 0.6236`
+- `RAGAS` 缩减对比可稳定运行：
+  - `CRUD 10`：`Context Recall = 1.0000`，`Faithfulness = 0.7288`，`Factual Correctness = 0.4540`，`Answer Relevance = 0.4841`
+  - `Domain 10`：`Context Recall = 0.8333`，`Faithfulness = 0.5284`，`Factual Correctness = 0.0570`，`Answer Relevance = 0.2402`
+
+### 当前状态
+- 评测脚本已经形成“检索指标 + RAGAS 指标”的完整闭环。
+- 当前 `CRUD=1.0` 更适合解释为“项目内闭环评测非常稳定”，不宜直接表述为通用 benchmark 意义上的“检索已经完美”。
+- `DomainRAG proxy` 小库已经能稳定暴露开放域检索中的真实短板，后续优化将以它为主要观测对象。
+
+## 2026-04-18 Domain 检索定向优化（时间敏感 + 多文档覆盖）
+
+### 目标
+- 针对 `Domain 100` 中最薄弱的 `time-sensitive_qa` 和 `multi-doc_qa` 做“一改一测”式检索优化。
+- 在不破坏当前 CRUD 稳定性的前提下，提升 Domain 侧排序质量和前排证据覆盖。
+
+### 实施内容
+- 时间敏感检索优化：
+  - 更新 `app/retrievers/local_kb.py`
+  - 增加时间敏感 query 识别、时间锚点抽取、时间匹配加权
+  - 时间信号同时接入混合检索与启发式重排
+- 查询改写保护：
+  - 更新 `app/services/query_rewrite_service.py`
+  - 对“年份 / 最新 / 当前 / 截止时间”等约束做保护，避免改写时丢失
+- `date` 元数据落库：
+  - 更新 `app/loaders/factory.py`
+  - 更新 `scripts/import_domainrag_kb.py`
+  - 让 sidecar `.rag_file_metadata.json` 中的 `date` 真正进入 chunk metadata
+- 多文档覆盖优化：
+  - 更新 `app/retrievers/local_kb.py`
+  - 对 `multi-doc_qa` 增加文档家族识别与多源覆盖优先策略
+  - 在重排阶段避免同一来源反复占位
+
+### 验证结果
+- `time-sensitive_qa` 20 条子集从初始基线：
+  - `Recall@5 = 0.40`
+  - `MRR = 0.1717`
+  - `NDCG@5 = 0.2261`
+- 提升到当前稳定版本：
+  - `Recall@5 = 0.55`
+  - `MRR = 0.2658`
+  - `NDCG@5 = 0.3348`
+- `multi-doc_qa` 20 条子集优化后：
+  - `Recall@5 = 1.0000`
+  - `MRR = 0.9417`
+  - `NDCG@5 = 0.7366`
+  - 其中 `NDCG@5` 相对该子集基线 `0.7215` 有提升
+- `Domain 100` 整体从初始基线：
+  - `Recall@5 = 0.8000`
+  - `MRR = 0.6262`
+  - `NDCG@5 = 0.6236`
+- 提升到当前稳定版本：
+  - `Recall@5 = 0.8700`
+  - `MRR = 0.7250`
+  - `NDCG@5 = 0.7164`
+
+### 当前状态
+- 时间敏感检索与多文档覆盖优化已保留在主链路中。
+- 当前 `Domain` 检索侧已经从“能召回但排不准”显著改善到“召回和排序都更稳”的状态。
+- 下一阶段如果继续优化检索，更应该切向真实多 chunk 语料验证 `chunk / metadata` 策略，而不是继续在 proxy 小库上做 prompt 侧微调。
+
+## 2026-04-18 生成层小步实验与保留策略
+
+### 目标
+- 在不动检索主链路的前提下，围绕 `Factual Correctness` 偏低的问题，对生成层做可回退的小步实验。
+- 通过 `Domain` 小样本快测筛选出值得保留的改动，避免再次出现“大改后整体回归”。
+
+### 实施内容
+- 当前保留的改动：
+  - 更新 `app/chains/rag.py`
+  - 新增事实审校 prompt
+  - 将 `maybe_refine_rag_answer()` 扩成“完备性审校 + 事实审校”
+  - 抽出通用 JSON 修订调用辅助函数，便于后续继续加 review 规则
+- 已尝试但未保留的改动：
+  - 动态增加生成阶段上下文块数
+  - 强制“结论 / 依据 / 不确定点”输出模板
+  - 槽位回填式复审
+  - 生成阶段证据块重排
+  - 结构化证据摘要展示
+  - 生成专用 top-k 证据选择器
+
+### 验证结果
+- 在 `Domain` 5 条小样本快测上：
+  - 改前：`factual_correctness = 0.1380`，`response_relevancy = 0.0971`
+  - 加入事实审校后：`factual_correctness = 0.1680`，`response_relevancy = 0.0970`
+- 其余几轮 prompt / 后处理实验都未稳定超过当前最佳值，因此均已回退，不保留到主链路。
+
+### 当前状态
+- 生成层当前只保留“事实审校器”这一刀。
+- 当前判断是：生成层靠 prompt 和后处理继续做小修小补，收益已经接近边界；下一步更值得回到“证据质量”和“真实多 chunk 语料”上做验证。
+
+## 2026-04-18 结构化切块实验库与 Markdown 标题感知切分
+
+### 目标
+- 为 `chunk / metadata` 优化建立一套真正能切出多块的实验语料，避免继续在 `327 文件 = 327 chunks` 的 proxy 知识库上测不出差异。
+- 验证 Markdown 标题感知切分是否能提升章节 metadata 质量，同时控制过碎切块问题。
+
+### 实施内容
+- 新建实验知识库 `structured_chunk_demo`：
+  - 使用 1 个 PDF + 4 个长 Markdown 文档构造真实多 chunk 语料
+- 更新 `app/chains/text_splitter.py`：
+  - `.md` 文档自动走 `MarkdownHeaderTextSplitter`
+  - 其他格式继续走原有递归切分器
+- 为 Markdown 切分增加保护逻辑：
+  - 新增最小章节长度保护
+  - 对过短章节做相邻合并
+  - 过滤 `--- / *** / ___` 这类纯分隔线，避免单独变成 chunk
+
+### 验证结果
+- `structured_chunk_demo` 初始重建结果：
+  - `5` 个文件
+  - `22` 个原始文档单元
+  - `145` 个 chunks
+- 仅开启 Markdown 标题感知切分后：
+  - chunks 增长到 `385`
+  - Markdown 的 `section_title / section_path` 覆盖率达到 `100%`
+  - 但出现了明显过碎问题
+- 加入“短章节合并 / 最小块长度保护”后：
+  - 总 chunks 降到 `227`
+  - Markdown 的 `section_title / section_path` 仍保持 `100%`
+  - `<120` 长度的异常小块从 `1` 个降到 `0`
+  - 最终各文件 chunk 数：
+    - `beyond_rag_agent_memory.pdf`：`58`
+    - `LangChain-RAG-Agent-学习与搭建文档.md`：`51`
+    - `RAG-Agent-分阶段TODO.md`：`46`
+    - `process.md`：`37`
+    - `优化方案.md`：`35`
+
+### 当前状态
+- 标题感知切分与短章节合并逻辑已保留在代码中。
+- 当前还没有在这套实验库上跑正式检索 benchmark，下一步应补一轮 retrieval smoke test，确认结构化切块是否真的带来检索收益。
+
+## 2026-04-18 Agent 最终答案生成切到 LLM 综合生成
+
+### 目标
+- 把 `multistep.py` 中针对 `calculate / current_time / 多工具组合` 的硬编码结果拼接逻辑，统一替换为 LLM 综合生成。
+- 保持纯 RAG 路径不变，避免影响当前 `/chat/rag` 主链路和已有 RAG 评测结果。
+
+### 实施内容
+- 更新 `app/agents/multistep.py`：
+  - 新增 `AGENT_SYNTHESIS_SYSTEM_PROMPT`
+  - 新增 `_build_synthesis_prompt()`
+  - 新增 `_build_synthesis_variables()`
+  - 新增 `generate_synthesis_answer()`
+  - 新增 `stream_synthesis_answer()`
+- 更新 `build_agent_answer()` 与 `stream_agent_answer()`：
+  - 当 `executed_names == ["search_local_knowledge"]` 时，仍保持原有纯 RAG 生成路径
+  - 其余工具组合统一改为调用 LLM 综合生成最终回答
+
+### 验证结果
+- 纯 RAG 分支条件未修改，`search_local_knowledge` 单工具路径保持不变。
+- `calculate`、`current_time`、以及任意多工具组合不再依赖手写 `if-else` 拼接，能够输出更自然的中文结果说明。
+- 当前 `CRUD / Domain` 评测脚本不经过 `multistep agent`，因此这项改动不会直接反映在当前那套 `Recall@k / MRR / NDCG / RAGAS` 对比结果中。
+
+### 当前状态
+- Agent 工具选择已经是 LLM 驱动，这一轮改动让“最终答案生成”也同步切到了 LLM 综合生成。
+- 若后续要正式评估这部分收益，需要单独设计 Agent 场景评测集，重点看 `Answer Relevance` 和 `Factual Correctness`。
+
+## 2026-04-20 Reranker 模型对比评测（base vs v2-m3）
+
+### 目标
+- 在同一套 `Domain 100` 检索评测集上，只替换 `RERANK_MODEL`，其余检索配置保持不变。
+- 让结果差异尽量只反映 reranker 模型本身，而不是候选池、top-k、query rewrite 或 chunk 策略变化。
+
+### 实施内容
+- 保持以下条件固定：
+  - 评测集：`data/eval/domainrag_small_batch_100_domainrag_small_batch.jsonl`
+  - 知识库：`domainrag_small_batch_100`
+  - 其余配置保持当前稳定版本不变
+- 对比的两个模型：
+  - 基线：`./data/models/bge-reranker-base`
+  - 对照：`./data/models/bge-reranker-v2-m3`
+- 输出对比产物：
+  - `data/eval/reranker_compare_domain100_base_vs_v2_m3.json`
+  - `data/eval/reranker_compare_domain100_base_vs_v2_m3.md`
+
+### 验证结果
+- 整体指标对比：
+  - `Recall@5`：`0.8700 -> 0.8900`
+  - `MRR`：`0.7298 -> 0.7418`
+  - `NDCG@5`：`0.7317 -> 0.7482`
+  - `Top1 Hit`：`0.6600 -> 0.6700`
+- 分任务结果显示：
+  - `extractive_qa` 提升最明显：
+    - `MRR`：`0.6142 -> 0.6950`
+    - `NDCG@5`：`0.6839 -> 0.7568`
+    - `Top1 Hit`：`0.5000 -> 0.6000`
+  - `structured_qa` 继续提升到接近满分：
+    - `MRR`：`0.9750 -> 1.0000`
+    - `NDCG@5`：`0.9815 -> 1.0000`
+  - `conversation_qa` 小幅改善
+  - `multi-doc_qa` 有回退：
+    - `MRR`：`0.9500 -> 0.9083`
+    - `NDCG@5`：`0.7991 -> 0.7808`
+  - `time-sensitive_qa` 呈现混合变化：
+    - `Recall@5`：`0.5500 -> 0.6000`
+    - 但 `MRR`：`0.3017 -> 0.2892`
+    - `Top1 Hit`：`0.2000 -> 0.1500`
+
+### 当前状态
+- 这轮实验已经证明：在当前 `Domain 100` 评测集上，`bge-reranker-v2-m3` 的整体排序能力优于当前 `bge-reranker-base`。
+- 这项收益主要集中在 `extractive_qa` 和 `structured_qa`，尤其对 `extractive_qa top1 / MRR` 的拉升比较明显。
+- 代价是 `multi-doc_qa` 和 `time-sensitive_qa` 的部分子指标出现回退，因此如果后续切换默认 reranker，仍建议结合任务结构继续观察，而不是只看总体均值。
