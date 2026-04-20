@@ -1062,3 +1062,50 @@
 ### 当前状态
 - 这轮“按 query type 路由 reranker”已保留到主链路。
 - 当前判断是：在不重构召回和 chunk 的前提下，这种“默认模型 + 题型覆盖”的方式，比强行统一使用同一个 reranker 更稳。
+
+## 2026-04-20 Phase 0 人工集起始样本扩充（20 条）
+
+### 目标
+- 把此前只有少量示例的 `Phase 0` 人工集模板，扩成一版可以直接开始人工复核的起始样本集。
+- 让后续优化优先基于“小而准”的 gold 集做判断，而不是只看代理指标波动。
+
+### 实施内容
+- 更新 `data/eval/phase0_gold_annotation_guide.md`：
+  - 补充 `review_status`
+  - 补充多轮样本必填的 `history_qa`
+- 更新 `data/eval/phase0_gold_manual_template.jsonl`：
+  - 模板同步新增 `review_status`
+  - 模板同步新增 `history_qa`
+- 重写 `data/eval/phase0_gold_manual_seed.jsonl`：
+  - 从原来的 `4` 条种子扩充到 `20` 条
+  - 所有样本统一标记为 `seed_for_review`
+  - 样本来源覆盖：
+    - `domainrag_small_batch_100`
+    - `crud_rag_3qa_full`
+
+### 当前 20 条种子分布
+- `extractive_qa`：`6`
+- `time-sensitive_qa`：`4`
+- `multi-doc_qa`：`2`
+- `conversation_qa`：`2`
+- `CRUD cross-passage`：`6`
+
+### 验证结果
+- 已做 JSONL 结构校验：
+  - `count = 20`
+  - 首条：`phase0-seed-domain-extractive-001`
+  - 末条：`phase0-seed-crud-006`
+- 当前这 20 条已经具备以下字段：
+  - `query`
+  - `history_qa`
+  - `gold_documents`
+  - `gold_passages`
+  - `needs_cross_passage_aggregation`
+  - `notes`
+
+### 当前状态
+- 这批样本已经足够支撑第一轮人工复核和 bad case 分桶。
+- 目前仍未覆盖 `OCR / image evidence` 类型，下一批建议优先补：
+  - 图文联合证据
+  - OCR 干扰样本
+  - query rewrite drift 样本
