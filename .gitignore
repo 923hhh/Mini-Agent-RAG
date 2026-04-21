@@ -48,6 +48,8 @@ data/cache/
 data/external/
 data/models/
 data/huggingface/
+data/hf_cache/
+data/hf_home/
 data/tools/
 data/temp/
 data/_validate_tmp
