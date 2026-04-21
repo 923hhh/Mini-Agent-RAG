@@ -373,7 +373,7 @@ def build_rag_variables(
 ) -> dict[str, object]:
     history_messages = convert_history(history)
     coverage_requirements = build_coverage_requirements(query)
-    context = build_context(references)
+    context = build_context(query, references)
     memory_section = ""
     trimmed_memory = agent_memory_context.strip()
     if trimmed_memory:
@@ -390,11 +390,14 @@ def build_rag_variables(
     }
 
 
-def build_context(references: list[RetrievedReference]) -> str:
+def build_context(query: str, references: list[RetrievedReference]) -> str:
     if not references:
         return ""
 
-    prompt_references = deduplicate_references_for_prompt(references)
+    prompt_references = deduplicate_references_for_prompt(
+        references,
+        max_items=resolve_prompt_reference_limit(query, references),
+    )
 
     grouped_blocks = {
         "text": [],
@@ -425,7 +428,7 @@ def build_context(references: list[RetrievedReference]) -> str:
 def deduplicate_references_for_prompt(
     references: list[RetrievedReference],
     *,
-    max_items: int = 3,
+    max_items: int = 5,
 ) -> list[RetrievedReference]:
     ranked_references = sort_references_for_prompt(references)
     selected: list[RetrievedReference] = []
@@ -439,6 +442,50 @@ def deduplicate_references_for_prompt(
         if len(selected) >= max_items:
             break
     return selected or references[:max_items]
+
+
+def resolve_prompt_reference_limit(
+    query: str,
+    references: list[RetrievedReference],
+) -> int:
+    normalized = str(query or "").strip().lower()
+    if not normalized:
+        return 5 if len(references) >= 5 else 3
+
+    multi_part_markers = (
+        "分别",
+        "同时",
+        "以及",
+        "并且",
+        "共同",
+        "区别",
+        "不同",
+        "相同",
+        "哪些",
+        "哪几",
+        "包括",
+        "原因",
+        "措施",
+        "步骤",
+    )
+    if any(marker in normalized for marker in multi_part_markers):
+        return 5
+
+    answer_seeking_markers = (
+        "多少",
+        "几",
+        "哪一年",
+        "哪年",
+        "何时",
+        "什么时候",
+        "什么时间",
+        "哪个",
+        "是什么",
+    )
+    if any(marker in normalized for marker in answer_seeking_markers):
+        return 3
+
+    return 5 if len(references) >= 5 else 3
 
 
 def sort_references_for_prompt(

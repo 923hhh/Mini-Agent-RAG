@@ -14,6 +14,7 @@ from app.schemas.kb import (
 )
 from app.services.embedding_assembler import EmbeddingAssembler
 from app.services.kb_incremental_rebuild import rebuild_incremental_knowledge_base
+from app.services.sentence_index_service import rebuild_sentence_index
 from app.services.settings import AppSettings
 from app.services.temp_kb_service import create_temp_manifest, write_temp_manifest
 from app.storage.bm25_index import (
@@ -212,6 +213,15 @@ def upload_temp_files(
         )
     else:
         delete_bm25_index(bm25_index_path)
+
+    rebuild_sentence_index(
+        settings=settings,
+        vector_store_dir=vector_store_dir,
+        knowledge_name=knowledge_id,
+        chunk_entries=assembled.entries,
+        embeddings=assembler.embeddings,
+        vector_store_type=assembler.vector_store_type,
+    )
 
     manifest = create_temp_manifest(
         settings=settings,

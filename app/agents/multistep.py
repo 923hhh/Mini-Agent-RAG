@@ -43,6 +43,13 @@ AGENT_DIRECT_SYSTEM_PROMPT = """你是一个简洁、准确的中文智能体助
 当问题不需要调用工具时，直接回答即可。
 若问题信息不足，明确说明缺少什么信息，不要编造。"""
 
+AGENT_SYNTHESIS_SYSTEM_PROMPT = """你是一个中文智能体助手。
+你已经执行了若干工具，现在需要根据工具输出综合生成最终答案。
+规则：
+1. 只基于工具输出和对话历史作答，不要编造工具未返回的信息。
+2. 如果工具输出不足以回答问题，明确说明缺少什么。
+3. 回答简洁、直接，不要重复工具调用过程。"""
+
 AGENT_TOOL_PLANNING_SYSTEM_PROMPT = """你是一个负责规划下一步工具调用的中文智能体。
 你的任务不是直接展开长答案，而是判断“下一步是否需要调用一个工具”。
 
@@ -675,27 +682,7 @@ def build_agent_answer(
             return f"{answer} {state.stop_reason}"
         return answer
 
-    if "calculate" in executed_names:
-        calculate_output = latest_tool_output(state, "calculate")
-        if "search_local_knowledge" in executed_names:
-            answer = f"我先检索了知识库中的相关内容，再完成计算。计算结果：{calculate_output}。"
-        elif "current_time" in executed_names:
-            time_output = latest_tool_output(state, "current_time")
-            answer = f"我先获取了当前时间（{time_output}），再完成计算。计算结果：{calculate_output}。"
-        else:
-            answer = f"计算结果：{calculate_output}。"
-        if state.stop_reason:
-            return f"{answer} {state.stop_reason}"
-        return answer
-
-    if executed_names == ["current_time"]:
-        answer = f"当前时间：{latest_tool_output(state, 'current_time')}。"
-        if state.stop_reason:
-            return f"{answer} {state.stop_reason}"
-        return answer
-
-    latest_output = state.executed_tools[-1].result.output
-    answer = f"我已按顺序执行工具：{', '.join(executed_names)}。最后一步输出：{latest_output}。"
+    answer = generate_synthesis_answer(settings, request, state, memory_context=memory_context)
     if state.stop_reason:
         return f"{answer} {state.stop_reason}"
     return answer
@@ -759,9 +746,7 @@ def stream_agent_answer(
         )
         return
 
-    yield from iter_text_chunks(
-        build_agent_answer(settings, request, state, memory_context=memory_context)
-    )
+    yield from stream_synthesis_answer(settings, request, state, memory_context=memory_context)
 
 
 def emit_tool_call(emit: Callable[[dict[str, Any]], None] | None, tool_call: ToolCallRecord) -> None:
@@ -905,6 +890,71 @@ def build_agent_direct_prompt() -> ChatPromptTemplate:
             MessagesPlaceholder("history"),
             ("human", "{memory_section}{query}"),
         ]
+    )
+
+
+def _build_synthesis_prompt() -> ChatPromptTemplate:
+    return ChatPromptTemplate.from_messages(
+        [
+            ("system", AGENT_SYNTHESIS_SYSTEM_PROMPT),
+            MessagesPlaceholder("history"),
+            (
+                "human",
+                "{memory_section}工具执行结果：\n{tool_outputs}\n\n用户问题：{query}",
+            ),
+        ]
+    )
+
+
+def _build_synthesis_variables(
+    request: AgentChatRequest,
+    state: AgentExecutionState,
+    memory_context: str,
+) -> dict[str, object]:
+    tool_outputs = "\n".join(
+        f"[{r.tool_name}] {r.result.output}" for r in state.executed_tools
+    )
+    return {
+        "history": convert_history(request.history),
+        "memory_section": format_agent_memory_section(memory_context),
+        "tool_outputs": tool_outputs,
+        "query": request.query,
+    }
+
+
+def generate_synthesis_answer(
+    settings: AppSettings,
+    request: AgentChatRequest,
+    state: AgentExecutionState,
+    *,
+    memory_context: str = "",
+) -> str:
+    prompt = _build_synthesis_prompt()
+    variables = _build_synthesis_variables(request, state, memory_context)
+    llm = build_chat_model(
+        settings,
+        model_name=settings.model.AGENT_MODEL,
+        temperature=settings.model.TEMPERATURE,
+    )
+    chain = prompt | llm | StrOutputParser()
+    return chain.invoke(variables)
+
+
+def stream_synthesis_answer(
+    settings: AppSettings,
+    request: AgentChatRequest,
+    state: AgentExecutionState,
+    *,
+    memory_context: str = "",
+) -> Iterator[str]:
+    prompt = _build_synthesis_prompt()
+    variables = _build_synthesis_variables(request, state, memory_context)
+    yield from stream_prompt_output(
+        settings,
+        prompt,
+        variables,
+        model_name=settings.model.AGENT_MODEL,
+        temperature=settings.model.TEMPERATURE,
     )
 
 

@@ -12,11 +12,11 @@
     ]
   },
   "summary": {
-    "top1_accuracy": 0.65,
+    "top1_accuracy": 0.6,
     "recall_at_20": 1.0,
     "recall_at_50": 1.0,
-    "mrr_at_10": 0.7379761904761905,
-    "ndcg_at_10": 0.7907932921959571,
+    "mrr_at_10": 0.7113888888888888,
+    "ndcg_at_10": 0.7778634060359437,
     "status_counts": {
       "passed": 2,
       "bad_case": 18
@@ -97,14 +97,14 @@
         "中法那些事儿",
         "中法那些事儿",
         "2020中法学院热点问题解答",
-        "2020中法学院热点问题解答"
+        "2018中法学院招生热点问题解答"
       ],
       "top5_sources": [
         "中法那些事儿__doc-1723__psg-ref3__7487bc76d19f.txt",
         "中法那些事儿__doc-159__psg-7__af436beeccfc.txt",
         "中法那些事儿__doc-159__psg-ref2__d1917bf4f46a.txt",
-        "2020中法学院热点问题解答__doc-1953__psg-ref5__d957046a0fe4.txt",
-        "2020中法学院热点问题解答__doc-325__psg-ref4__560557ed4184.txt"
+        "2020中法学院热点问题解答__doc-325__psg-ref4__560557ed4184.txt",
+        "2018中法学院招生热点问题解答__doc-593__psg-ref4__c6e23a516043.txt"
       ],
       "top5_modalities": [
         "text",
@@ -509,34 +509,34 @@
       "needs_cross_passage_aggregation": false,
       "status": "bad_case",
       "assigned_failure_bucket": "low_rank",
-      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 7，未能稳定进入 top1。",
+      "failure_bucket_reason": "gold 文档已命中，但最佳排名为 9，未能稳定进入 top1。",
       "top1_hit": false,
       "hit_at_20": true,
       "hit_at_50": true,
-      "mrr_at_10": 0.14285714285714285,
-      "ndcg_at_10": 0.3333333333333333,
-      "rank_at_20": 7,
-      "rank_at_50": 7,
+      "mrr_at_10": 0.1111111111111111,
+      "ndcg_at_10": 0.3010299956639812,
+      "rank_at_20": 9,
+      "rank_at_50": 9,
       "matched_reference_count_at_20": 1,
       "matched_ranks_at_20": [
-        7
+        9
       ],
       "gold_passage_match_ranks_top5": [],
       "gold_passage_match_ranks_top10": [],
       "gold_passage_match_ranks_top20": [],
       "top5_titles": [
+        "中国人民大学2022年国家专项计划和“圆梦计划”热点解答",
         "中国人民大学2016年“圆梦计划”招生简章",
         "中国人民大学2016年“圆梦计划”招生简章",
         "中国人民大学2016年“圆梦计划”招生简章",
-        "中国人民大学2020年“圆梦计划” 招生简章",
-        "中国人民大学2016年“圆梦计划”招生简章"
+        "中国人民大学2020年“圆梦计划” 招生简章"
       ],
       "top5_sources": [
+        "中国人民大学2022年国家专项计划和_圆梦计划_热点解答__doc-225__psg-ref4__9ff934feb1aa.txt",
         "中国人民大学2016年_圆梦计划_招生简章__doc-286__psg-ref2__f9233ad7d755.txt",
         "中国人民大学2016年_圆梦计划_招生简章__doc-153__psg-ref3__24f0b9aac183.txt",
         "中国人民大学2016年_圆梦计划_招生简章__doc-650__psg-ref5__5401844c6165.txt",
-        "中国人民大学2020年_圆梦计划_招生简章__doc-285__psg-ref2__2231f2ec4601.txt",
-        "中国人民大学2016年_圆梦计划_招生简章__doc-153__psg-0__5904f01fcbe0.txt"
+        "中国人民大学2020年_圆梦计划_招生简章__doc-285__psg-ref2__2231f2ec4601.txt"
       ],
       "top5_modalities": [
         "text",
@@ -903,13 +903,13 @@
       "gold_passage_match_ranks_top10": [],
       "gold_passage_match_ranks_top20": [],
       "top5_titles": [
-        "news1",
         "news3",
+        "news1",
         "news2"
       ],
       "top5_sources": [
-        "news1.txt",
         "news3.txt",
+        "news1.txt",
         "news2.txt"
       ],
       "top5_modalities": [
@@ -936,29 +936,29 @@
       "status": "bad_case",
       "assigned_failure_bucket": "cross_passage",
       "failure_bucket_reason": "该问题依赖跨段信息，但 top-10 内没有形成足够的 gold passage 覆盖。",
-      "top1_hit": true,
+      "top1_hit": false,
       "hit_at_20": true,
       "hit_at_50": true,
-      "mrr_at_10": 1.0,
-      "ndcg_at_10": 0.9197207891481876,
-      "rank_at_20": 1,
-      "rank_at_50": 1,
+      "mrr_at_10": 0.5,
+      "ndcg_at_10": 0.6934264036172708,
+      "rank_at_20": 2,
+      "rank_at_50": 2,
       "matched_reference_count_at_20": 2,
       "matched_ranks_at_20": [
-        1,
+        2,
         3
       ],
       "gold_passage_match_ranks_top5": [],
       "gold_passage_match_ranks_top10": [],
       "gold_passage_match_ranks_top20": [],
       "top5_titles": [
-        "news1",
         "news2",
+        "news1",
         "news3"
       ],
       "top5_sources": [
-        "news1.txt",
         "news2.txt",
+        "news1.txt",
         "news3.txt"
       ],
       "top5_modalities": [

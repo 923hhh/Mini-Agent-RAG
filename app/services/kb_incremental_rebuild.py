@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from app.loaders.documents import list_supported_files
 from app.schemas.kb import DocumentChunkRecord, RebuildKnowledgeBaseResult
 from app.services.embedding_assembler import EmbeddingAssembler, extract_header_metadata
+from app.services.sentence_index_service import rebuild_sentence_index
 from app.services.settings import AppSettings
 from app.storage.bm25_index import (
     build_persisted_bm25_document,
@@ -179,12 +180,35 @@ def rebuild_incremental_knowledge_base(
 
     if index_mode == "reuse":
         started_at = perf_counter()
+        reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
         if settings.kb.ENABLE_HYBRID_RETRIEVAL and not bm25_index_path.exists():
-            reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
             write_bm25_index_for_caches(bm25_index_path, reused_caches)
         elif not settings.kb.ENABLE_HYBRID_RETRIEVAL:
             delete_bm25_index(bm25_index_path)
         stage_timings["bm25_index_write"] = round(perf_counter() - started_at, 4)
+        if settings.kb.ENABLE_SENTENCE_INDEX:
+            started_at = perf_counter()
+            emit_progress(progress_callback, 0.90, "[rebuild] 复用缓存并补建句级索引")
+            sentence_assembler = EmbeddingAssembler(
+                settings,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                embedding_model=embedding_model,
+                text_splitter_name=settings.kb.TEXT_SPLITTER_NAME,
+                vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+            )
+            rebuild_sentence_index(
+                settings=settings,
+                vector_store_dir=vector_store_dir,
+                knowledge_name=knowledge_base_name,
+                chunk_entries=[
+                    cached_entry_to_vector_entry(item)
+                    for item in flatten_chunk_entries(reused_caches)
+                ],
+                embeddings=sentence_assembler.embeddings,
+                vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+            )
+            stage_timings["sentence_index_build"] = round(perf_counter() - started_at, 4)
         emit_progress(progress_callback, 0.92, "[rebuild] 复用现有索引，正在写入 manifest")
         final_manifest = build_manifest_from_plans(
             knowledge_base_name=knowledge_base_name,
@@ -263,11 +287,10 @@ def rebuild_incremental_knowledge_base(
             )
         metadata_records = existing_records + [chunk_entry_to_record(item) for item in new_chunk_entries]
         stage_timings["index_build"] = round(perf_counter() - started_at, 4)
-        if settings.kb.ENABLE_HYBRID_RETRIEVAL:
-            reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
-            all_chunk_entries_for_bm25 = flatten_chunk_entries(
-                reused_caches + [cache for _, cache in rebuilt_outputs.values()]
-            )
+        reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
+        all_chunk_entries_for_bm25 = flatten_chunk_entries(
+            reused_caches + [cache for _, cache in rebuilt_outputs.values()]
+        )
     else:
         reused_caches = load_cached_caches_for_plans(reused_plans, chunk_cache_dir)
         all_chunk_entries = flatten_chunk_entries(reused_caches + [cache for _, cache in rebuilt_outputs.values()])
@@ -300,6 +323,21 @@ def rebuild_incremental_knowledge_base(
     else:
         delete_bm25_index(bm25_index_path)
     stage_timings["bm25_index_write"] = round(perf_counter() - started_at, 4)
+    if settings.kb.ENABLE_SENTENCE_INDEX:
+        started_at = perf_counter()
+        emit_progress(progress_callback, 0.97, "[rebuild] 构建句级副索引")
+        rebuild_sentence_index(
+            settings=settings,
+            vector_store_dir=vector_store_dir,
+            knowledge_name=knowledge_base_name,
+            chunk_entries=[
+                cached_entry_to_vector_entry(item)
+                for item in all_chunk_entries_for_bm25
+            ],
+            embeddings=assembler.embeddings,
+            vector_store_type=settings.kb.DEFAULT_VS_TYPE,
+        )
+        stage_timings["sentence_index_build"] = round(perf_counter() - started_at, 4)
     final_manifest = build_manifest_from_plans(
         knowledge_base_name=knowledge_base_name,
         plans=plans,

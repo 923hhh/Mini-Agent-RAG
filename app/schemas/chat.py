@@ -65,7 +65,7 @@ class ChatRequest(BaseModel):
     source_type: Literal["local_kb", "temp_kb"] = "local_kb"
     knowledge_base_name: str = ""
     knowledge_id: str = ""
-    top_k: int = Field(default=4, ge=1, le=20)
+    top_k: int = Field(default=10, ge=1, le=20)
     score_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     history: list[ChatMessage] = Field(default_factory=list)
     metadata_filters: MetadataFilters | None = None
@@ -130,7 +130,7 @@ class AgentChatRequest(BaseModel):
     query: str = Field(min_length=1)
     session_id: str | None = None
     knowledge_base_name: str = ""
-    top_k: int = Field(default=4, ge=1, le=20)
+    top_k: int = Field(default=10, ge=1, le=20)
     score_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     history: list[ChatMessage] = Field(default_factory=list)
     metadata_filters: MetadataFilters | None = None

@@ -120,6 +120,9 @@ ANSWER_GRADE_PATTERN = re.compile(r"(?:A\+|A-|A|B\+|B-|B|C\+|C-|C|甲类|乙类|
 ANSWER_SEEKING_HINTS = (
     "多少",
     "几",
+    "谁",
+    "哪位",
+    "何人",
     "哪一年",
     "哪年",
     "何时",
@@ -127,6 +130,7 @@ ANSWER_SEEKING_HINTS = (
     "开始时间",
     "什么时间",
     "什么等级",
+    "被评为",
     "哪三个",
     "哪几",
     "哪些",
@@ -156,6 +160,7 @@ ANSWER_LABEL_TERMS = (
 )
 LIST_QUERY_HINTS = ("哪些", "哪三个", "哪几", "包括哪些")
 LANGUAGE_TERMS = ("汉语", "中文", "英语", "英文", "法语", "法文", "德语", "日语", "俄语")
+ANSWER_ROLE_TERMS = ("校长", "院长", "主任", "书记", "负责人", "创办", "成立")
 ANSWER_WINDOW_SPLIT_PATTERN = re.compile(r"(?:\r?\n+|[。！？!?；;])")
 RERANK_FIELD_MAX_CHARS = 80
 RERANK_SUMMARY_MAX_CHARS = 120
@@ -178,6 +183,10 @@ class RetrievalCandidate:
     rerank_score: float = 0.0
     model_rerank_score: float = 0.0
     relevance_score: float = 0.0
+    body_overlap_ratio: float = 0.0
+    answer_window_overlap_ratio: float = 0.0
+    answer_support_bonus: float = 0.0
+    answer_focus_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -879,6 +888,13 @@ def heuristic_rerank_candidates(
         source_text = f"{candidate.document.metadata.get('title', '')} {candidate.document.metadata.get('source', '')}".lower()
         source_bonus = 0.4 if any(term in source_text for term in query_terms if len(term) >= 2) else 0.0
         answer_support_bonus = compute_answer_support_bonus(primary_query, preferred_answer_text)
+        answer_focus_score = min(
+            1.0,
+            0.35 * body_overlap_ratio
+            + 0.45 * answer_window_overlap_ratio
+            + 1.80 * answer_support_bonus
+            + (0.10 if sentence_hint else 0.0),
+        )
 
         fused_component = candidate.fused_score / max_fused
         dense_component = candidate.dense_relevance / max_dense
@@ -929,6 +945,10 @@ def heuristic_rerank_candidates(
             -0.25,
             min(1.0, candidate.relevance_score + temporal_bonus),
         )
+        candidate.body_overlap_ratio = body_overlap_ratio
+        candidate.answer_window_overlap_ratio = answer_window_overlap_ratio
+        candidate.answer_support_bonus = answer_support_bonus
+        candidate.answer_focus_score = answer_focus_score
         reranked.append(candidate)
 
     reranked.sort(key=lambda item: item.rerank_score, reverse=True)
@@ -1425,6 +1445,12 @@ def compute_answer_support_bonus(primary_query: str, page_text: str) -> float:
 
     if "等级" in query and ANSWER_GRADE_PATTERN.search(text):
         bonus += 0.05
+        if any(marker in lowered for marker in ("被评为", "评为", "获评")):
+            bonus += 0.03
+
+    if any(hint in query for hint in ("谁", "哪位", "何人")):
+        if any(role in text for role in ANSWER_ROLE_TERMS):
+            bonus += 0.05
 
     if "语言" in query:
         language_hits = sum(1 for term in LANGUAGE_TERMS if term in text)
