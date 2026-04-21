@@ -1,3 +1,5 @@
+﻿"""提供文本清洗、截断与格式化等通用工具。"""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping

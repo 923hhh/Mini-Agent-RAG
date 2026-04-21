@@ -1,3 +1,5 @@
+"""构建和访问句级辅助索引。"""
+
 from __future__ import annotations
 
 import json
@@ -6,8 +8,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.services.embedding_service import embed_texts_batched
-from app.services.settings import AppSettings
+from app.services.models.embedding_service import embed_texts_batched
+from app.services.core.settings import AppSettings
 from app.storage.bm25_index import (
     build_persisted_bm25_document,
     build_search_text_from_parts,
@@ -252,3 +254,4 @@ def split_long_sentence(text: str, *, max_chars: int) -> list[str]:
     if current:
         chunks.append(current.strip())
     return chunks or [text.strip()]
+

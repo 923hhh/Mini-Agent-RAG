@@ -1,3 +1,5 @@
+﻿"""加载 PDF 文档并提取文本与页面级内容。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

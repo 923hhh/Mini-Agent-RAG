@@ -1,3 +1,5 @@
+"""构造 CRUD 评测样本与对应参考信息。"""
+
 from __future__ import annotations
 
 import json

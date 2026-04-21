@@ -1,28 +1,29 @@
 ## Service Layout
 
-This directory now uses a compatibility-first layout:
+`app/services` now keeps only category directories so the structure is readable
+at a glance.
 
-- Top-level `*_service.py` files that remain here are stable entry points.
-- Files grouped under subpackages contain the actual implementation for
-  evaluation, knowledge-base, and retrieval concerns.
-- Thin wrappers are kept at the old paths so the rest of the codebase does not
-  need a risky all-at-once import rewrite.
-
-Current grouping:
-
+- `core/`
+  - shared configuration and infrastructure helpers
+  - `settings.py`
+  - `network.py`
+  - `observability.py`
+- `models/`
+  - model client construction and model-adjacent helpers
+  - `llm_service.py`
+  - `streaming_llm.py`
+  - `embedding_service.py`
+  - `image_caption_service.py`
+- `runtime/`
+  - app lifecycle and transient runtime state
+  - `init_service.py`
+  - `memory_service.py`
+  - `temp_kb_service.py`
 - `evaluation/`
-  - `crud_eval_cases.py`
-  - `eval_reference_utils.py`
+  - evaluation case and reference helpers
 - `kb/`
-  - `embedding_assembler.py`
-  - `kb_incremental_rebuild.py`
-  - `kb_ingestion_service.py`
-  - `rebuild_task_service.py`
-  - `sentence_index_service.py`
+  - knowledge-base build and rebuild services
 - `retrieval/`
-  - `query_rewrite_service.py`
-  - `reference_overview.py`
-  - `rerank_service.py`
-  - `web_search_service.py`
+  - query rewrite, rerank, web correction, reference formatting
 
-This is a structural cleanup, not a behavior rewrite.
+The goal of this layout is clarity, not behavior change.

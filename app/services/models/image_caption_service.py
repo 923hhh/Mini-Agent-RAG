@@ -1,3 +1,5 @@
+"""调用图像理解模型生成图片描述与视觉摘要。"""
+
 from __future__ import annotations
 
 import base64
@@ -11,9 +13,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from app.services.network import build_httpx_client
-from app.services.settings import AppSettings
-from app.services.llm_service import (
+from app.services.core.network import build_httpx_client
+from app.services.core.settings import AppSettings
+from app.services.models.llm_service import (
     resolve_openai_compatible_api_key,
     resolve_openai_compatible_base_url,
 )
@@ -678,3 +680,4 @@ def resolve_image_vlm_api_key(settings: AppSettings) -> str:
             return value
 
     return resolve_openai_compatible_api_key(settings)
+

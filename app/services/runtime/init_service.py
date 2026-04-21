@@ -1,9 +1,11 @@
+"""初始化项目目录、默认配置与启动前资源。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.services.settings import (
+from app.services.core.settings import (
     AppSettings,
     default_config_data,
     dump_yaml,
@@ -90,3 +92,4 @@ def render_init_summary(result: InitResult) -> str:
         f"日志目录: {basic.LOG_PATH}",
     ]
     return "\n".join(lines)
+

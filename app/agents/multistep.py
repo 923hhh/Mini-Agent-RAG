@@ -1,3 +1,5 @@
+﻿"""组织多步工具调用与综合回答的 Agent 主链路。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
@@ -19,16 +21,16 @@ from app.schemas.chat import (
     RetrievedReference,
     ToolCallRecord,
 )
-from app.services.llm_service import build_chat_model
-from app.services.memory_service import (
+from app.services.models.llm_service import build_chat_model
+from app.services.runtime.memory_service import (
     agent_memory_enabled,
     persist_agent_turns,
     retrieve_agent_memory,
     sanitize_session_id,
 )
-from app.services.reference_overview import build_reference_overview
-from app.services.settings import AppSettings
-from app.services.streaming_llm import stream_prompt_output
+from app.services.retrieval.reference_overview import build_reference_overview
+from app.services.core.settings import AppSettings
+from app.services.models.streaming_llm import stream_prompt_output
 from app.tools.registry import (
     ToolExecutionResult,
     build_langchain_tool_schemas,
@@ -1071,3 +1073,4 @@ def normalize_expression(expression: str) -> str:
     if re.fullmatch(r"[\d\.\+\-\*\/%\(\)]+", normalized) and re.search(r"\d", normalized):
         return normalized
     return ""
+

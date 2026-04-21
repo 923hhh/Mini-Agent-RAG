@@ -1,3 +1,5 @@
+"""将文档块组装为可写入向量库的 embedding 批次。"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -11,8 +13,8 @@ from langchain_core.documents import Document
 from app.chains.text_splitter import split_documents
 from app.loaders.documents import load_documents, load_file
 from app.schemas.kb import DocumentChunkRecord
-from app.services.embedding_service import build_embeddings, embed_texts_batched
-from app.services.settings import AppSettings
+from app.services.models.embedding_service import build_embeddings, embed_texts_batched
+from app.services.core.settings import AppSettings
 from app.storage.vector_stores import VectorStoreEntry, build_vector_store_adapter
 from app.utils.text import coerce_optional_text, extract_header_metadata
 
@@ -205,3 +207,4 @@ def attach_chunk_metadata(chunks: list[Document]) -> list[DocumentChunkRecord]:
             )
         )
     return records
+

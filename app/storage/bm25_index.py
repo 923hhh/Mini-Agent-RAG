@@ -1,3 +1,5 @@
+﻿"""构建、保存与加载 BM25 倒排索引。"""
+
 from __future__ import annotations
 
 import json

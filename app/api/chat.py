@@ -1,3 +1,5 @@
+﻿"""提供对话问答相关的 API 路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
@@ -15,9 +17,9 @@ from app.retrievers.local_kb import (
     search_temp_knowledge_base_second_pass,
 )
 from app.schemas.chat import AgentChatRequest, AgentChatResponse, ChatRequest, ChatResponse
-from app.services.reference_overview import build_reference_overview
-from app.services.temp_kb_service import TempKnowledgeBaseExpiredError
-from app.services.web_search_service import search_corrective_web_references
+from app.services.retrieval.reference_overview import build_reference_overview
+from app.services.runtime.temp_kb_service import TempKnowledgeBaseExpiredError
+from app.services.retrieval.web_search_service import search_corrective_web_references
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -258,3 +260,4 @@ def agent_chat(
             status_code=500,
             detail=error_payload(code="agent_execution_failed", message=f"Agent 执行失败: {exc}"),
         ) from exc
+

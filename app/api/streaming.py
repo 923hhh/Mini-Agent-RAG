@@ -1,3 +1,5 @@
+﻿"""封装流式响应相关的 API 辅助逻辑。"""
+
 from __future__ import annotations
 
 import json

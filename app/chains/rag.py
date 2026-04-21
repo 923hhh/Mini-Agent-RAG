@@ -1,3 +1,5 @@
+﻿"""组织 RAG 主链路的检索、生成与审校流程。"""
+
 from __future__ import annotations
 
 import json
@@ -11,11 +13,11 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from app.constants import IMAGE_QUERY_HINTS
 from app.schemas.chat import ChatMessage, RetrievedReference
-from app.services.llm_service import build_chat_model
-from app.services.observability import append_jsonl_trace
-from app.services.query_rewrite_service import format_history, sanitize_rewritten_query
-from app.services.settings import AppSettings
-from app.services.streaming_llm import stream_prompt_output
+from app.services.models.llm_service import build_chat_model
+from app.services.core.observability import append_jsonl_trace
+from app.services.retrieval.query_rewrite_service import format_history, sanitize_rewritten_query
+from app.services.core.settings import AppSettings
+from app.services.models.streaming_llm import stream_prompt_output
 
 
 RAG_SYSTEM_PROMPT = """你是一个基于本地知识库的问答助手。
@@ -1033,3 +1035,4 @@ def convert_history(history: list[ChatMessage]) -> list[BaseMessage]:
         elif item.role == "system":
             messages.append(SystemMessage(content=item.content))
     return messages
+

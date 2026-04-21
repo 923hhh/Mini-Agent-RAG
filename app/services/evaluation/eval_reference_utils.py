@@ -1,3 +1,5 @@
+"""评测阶段处理参考文档与命中信息的工具函数。"""
+
 from __future__ import annotations
 
 import re

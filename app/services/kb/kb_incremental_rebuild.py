@@ -1,3 +1,5 @@
+"""执行知识库的增量重建与索引刷新。"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -14,9 +16,9 @@ from pydantic import BaseModel, ConfigDict
 
 from app.loaders.documents import list_supported_files
 from app.schemas.kb import DocumentChunkRecord, RebuildKnowledgeBaseResult
-from app.services.embedding_assembler import EmbeddingAssembler, extract_header_metadata
-from app.services.sentence_index_service import rebuild_sentence_index
-from app.services.settings import AppSettings
+from app.services.kb.embedding_assembler import EmbeddingAssembler, extract_header_metadata
+from app.services.kb.sentence_index_service import rebuild_sentence_index
+from app.services.core.settings import AppSettings
 from app.storage.bm25_index import (
     build_persisted_bm25_document,
     delete_bm25_index,
@@ -905,3 +907,4 @@ def cached_entry_to_vector_entry(entry: CachedChunkEntry) -> VectorStoreEntry:
         metadata=dict(entry.metadata),
         embedding=list(entry.embedding),
     )
+

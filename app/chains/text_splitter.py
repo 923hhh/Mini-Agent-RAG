@@ -1,3 +1,5 @@
+﻿"""提供文档切块与结构化切分策略。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

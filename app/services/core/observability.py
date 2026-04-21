@@ -1,3 +1,5 @@
+"""记录检索与生成链路的轻量观测信息。"""
+
 from __future__ import annotations
 
 import json
@@ -5,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.services.settings import AppSettings
+from app.services.core.settings import AppSettings
 
 
 def append_jsonl_trace(
@@ -29,3 +31,4 @@ def append_jsonl_trace(
 def _trace_path(settings: AppSettings, trace_name: str) -> Path:
     normalized = trace_name.strip().replace(" ", "_")
     return settings.log_root / f"{normalized}.jsonl"
+

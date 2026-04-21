@@ -1,3 +1,5 @@
+﻿"""注册并按名称分发可用工具。"""
+
 from __future__ import annotations
 
 import ast
@@ -9,7 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.retrievers.local_kb import search_local_knowledge_base
 from app.schemas.chat import RetrievedReference, ToolDefinition
-from app.services.settings import AppSettings
+from app.services.core.settings import AppSettings
 from app.storage.filters import MetadataFilters
 
 
@@ -263,3 +265,4 @@ _TOOL_REGISTRY: dict[str, RegisteredTool] = {
         executor=_current_time,
     ),
 }
+

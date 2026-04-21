@@ -1,3 +1,5 @@
+"""把参考资料整理成便于前端展示的概览文本。"""
+
 from __future__ import annotations
 
 from app.schemas.chat import ReferenceOverview, RetrievedReference

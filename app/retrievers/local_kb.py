@@ -1,3 +1,5 @@
+﻿"""执行本地知识库的混合检索、重排与结果组装。"""
+
 from __future__ import annotations
 
 from datetime import date
@@ -12,13 +14,13 @@ from langchain_core.documents import Document
 
 from app.constants import IMAGE_QUERY_HINTS
 from app.schemas.chat import ChatMessage, RetrievedReference
-from app.services.embedding_service import build_embeddings
-from app.services.observability import append_jsonl_trace
-from app.services.query_rewrite_service import generate_hypothetical_doc, generate_multi_queries
-from app.services.rerank_service import RerankTextInput, rerank_texts
-from app.services.sentence_index_service import sentence_index_exists, resolve_sentence_index_dir
-from app.services.settings import AppSettings
-from app.services.temp_kb_service import ensure_temp_knowledge_available
+from app.services.models.embedding_service import build_embeddings
+from app.services.core.observability import append_jsonl_trace
+from app.services.retrieval.query_rewrite_service import generate_hypothetical_doc, generate_multi_queries
+from app.services.retrieval.rerank_service import RerankTextInput, rerank_texts
+from app.services.kb.sentence_index_service import sentence_index_exists, resolve_sentence_index_dir
+from app.services.core.settings import AppSettings
+from app.services.runtime.temp_kb_service import ensure_temp_knowledge_available
 from app.storage.bm25_index import (
     LoadedBM25Index,
     build_match_terms as build_bm25_match_terms,
@@ -2321,3 +2323,4 @@ def extract_path_hint_terms_from_queries(query_bundle: list[str]) -> tuple[str, 
             if len(token) >= 2
         )
     return tuple(deduplicate_strings(hints)[:8])
+

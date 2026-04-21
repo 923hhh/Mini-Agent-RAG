@@ -1,3 +1,5 @@
+"""负责知识库导入、重建与结果汇总。"""
+
 from __future__ import annotations
 
 import json
@@ -12,11 +14,11 @@ from app.schemas.kb import (
     KnowledgeBaseSummary,
     RebuildKnowledgeBaseResult,
 )
-from app.services.embedding_assembler import EmbeddingAssembler
-from app.services.kb_incremental_rebuild import rebuild_incremental_knowledge_base
-from app.services.sentence_index_service import rebuild_sentence_index
-from app.services.settings import AppSettings
-from app.services.temp_kb_service import create_temp_manifest, write_temp_manifest
+from app.services.kb.embedding_assembler import EmbeddingAssembler
+from app.services.kb.kb_incremental_rebuild import rebuild_incremental_knowledge_base
+from app.services.kb.sentence_index_service import rebuild_sentence_index
+from app.services.core.settings import AppSettings
+from app.services.runtime.temp_kb_service import create_temp_manifest, write_temp_manifest
 from app.storage.bm25_index import (
     build_persisted_bm25_document,
     delete_bm25_index,
@@ -420,3 +422,4 @@ def _requires_local_rebuild(
     has_content = any(path.is_file() for path in content_dir.rglob("*"))
     index_exists = vector_store_index_exists(vector_store_dir)
     return has_content and not index_exists
+

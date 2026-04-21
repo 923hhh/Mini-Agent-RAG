@@ -1,3 +1,5 @@
+﻿"""加载图片文件并提取 OCR 与视觉描述内容。"""
+
 from __future__ import annotations
 
 import os
@@ -18,10 +20,10 @@ from app.loaders.factory import BaseKnowledge, KnowledgeFactory, list_supported_
 from app.loaders.office import DocxKnowledge, EpubKnowledge
 from app.loaders.pdf import PdfKnowledge, PdfOutlineSection
 from app.loaders.text import MarkdownKnowledge, TextKnowledge
-from app.services.observability import append_jsonl_trace
+from app.services.core.observability import append_jsonl_trace
 
 if TYPE_CHECKING:
-    from app.services.settings import AppSettings
+    from app.services.core.settings import AppSettings
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -2222,3 +2224,4 @@ def _truncate_trace_text(text: str, *, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[:limit]}..."
+

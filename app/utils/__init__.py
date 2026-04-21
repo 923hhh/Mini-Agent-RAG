@@ -1,1 +1,1 @@
-"""Shared utility helpers."""
+﻿"""通用工具函数模块分组入口。"""

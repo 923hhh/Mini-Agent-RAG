@@ -1,3 +1,5 @@
+"""封装 reranker 模型加载与候选重排调用。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,7 +8,7 @@ from math import exp
 from pathlib import Path
 from typing import Literal
 
-from app.services.settings import AppSettings
+from app.services.core.settings import AppSettings
 
 
 @dataclass(frozen=True)
@@ -139,3 +141,4 @@ def resolve_rerank_model_path(settings: AppSettings, model_name: str) -> str:
 def normalize_rerank_score(raw_score: float) -> float:
     clipped = max(-18.0, min(18.0, float(raw_score)))
     return 1.0 / (1.0 + exp(-clipped))
+

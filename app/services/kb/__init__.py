@@ -1,1 +1,1 @@
-"""Knowledge-base related services."""
+"""知识库构建与重建服务分组。"""

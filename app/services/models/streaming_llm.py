@@ -1,3 +1,5 @@
+"""提供基于流式输出的 LLM 生成辅助函数。"""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -6,8 +8,8 @@ from typing import Any
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.services.llm_service import build_chat_model
-from app.services.settings import AppSettings
+from app.services.models.llm_service import build_chat_model
+from app.services.core.settings import AppSettings
 
 
 def stream_prompt_output(
@@ -64,3 +66,4 @@ def normalize_chunk_content(content: Any) -> str:
     if content is None:
         return ""
     return str(content)
+

@@ -1,3 +1,5 @@
+﻿"""提供知识库管理与重建相关的 API 路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -11,12 +13,12 @@ from app.schemas.kb import (
     RebuildTaskAccepted,
     RebuildTaskStatus,
 )
-from app.services.kb_ingestion_service import (
+from app.services.kb.kb_ingestion_service import (
     list_knowledge_bases,
     upload_local_files,
     upload_temp_files,
 )
-from app.services.rebuild_task_service import get_rebuild_task, submit_rebuild_task
+from app.services.kb.rebuild_task_service import get_rebuild_task, submit_rebuild_task
 
 
 router = APIRouter(prefix="/knowledge_base", tags=["knowledge_base"])
@@ -125,3 +127,4 @@ def get_knowledge_base_list(
             status_code=500,
             detail=error_payload(code="list_knowledge_bases_failed", message=f"知识库列表获取失败: {exc}"),
         ) from exc
+

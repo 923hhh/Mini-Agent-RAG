@@ -1,3 +1,5 @@
+﻿"""加载 Word、Excel、PPT 等 Office 文档内容。"""
+
 from __future__ import annotations
 
 import re

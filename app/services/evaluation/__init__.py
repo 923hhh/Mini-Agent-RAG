@@ -1,1 +1,1 @@
-"""Evaluation-related services."""
+"""评测相关服务分组。"""

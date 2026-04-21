@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import sys
@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.settings import load_settings
-from app.services.temp_kb_service import maybe_run_startup_cleanup, render_temp_cleanup_summary
+from app.services.core.settings import load_settings
+from app.services.runtime.temp_kb_service import maybe_run_startup_cleanup, render_temp_cleanup_summary
 
 
 def parse_args(settings) -> argparse.Namespace:
@@ -42,3 +42,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

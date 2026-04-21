@@ -1,3 +1,5 @@
+﻿"""封装向量库目录、加载与持久化逻辑。"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -9,7 +11,7 @@ from typing import Any
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
-from app.services.settings import AppSettings
+from app.services.core.settings import AppSettings
 from app.storage.filters import MetadataFilters, matches_metadata_filters, metadata_filters_to_chroma_where
 
 
@@ -299,3 +301,4 @@ def _sanitize_chroma_collection_name(name: str) -> str:
     if 3 <= len(normalized) <= 63 and ".." not in normalized:
         return normalized
     return f"kb-{sha1(name.encode('utf-8')).hexdigest()[:16]}"
+

@@ -1,3 +1,5 @@
+﻿"""组装并启动后端 API 应用。"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -9,7 +11,7 @@ from app.api.errors import install_exception_handlers
 from app.api.chat import router as chat_router
 from app.api.knowledge_base import router as knowledge_base_router
 from app.api.tools import router as tools_router
-from app.services.settings import load_settings
+from app.services.core.settings import load_settings
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -32,3 +34,4 @@ app.include_router(tools_router)
 @app.get("/health", tags=["system"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
+

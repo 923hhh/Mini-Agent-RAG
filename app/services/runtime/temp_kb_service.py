@@ -1,3 +1,5 @@
+"""管理临时知识库的创建、清理与有效期检查。"""
+
 from __future__ import annotations
 
 import json
@@ -13,7 +15,7 @@ from app.schemas.kb import (
     TempKnowledgeCleanupResult,
     TempKnowledgeManifest,
 )
-from app.services.settings import AppSettings
+from app.services.core.settings import AppSettings
 
 
 class TempKnowledgeBaseExpiredError(FileNotFoundError):
@@ -451,3 +453,4 @@ def _truncate_file(file_path: Path) -> None:
         file_path.write_text("", encoding="utf-8")
         return
     file_path.write_bytes(b"")
+

@@ -1,3 +1,5 @@
+﻿"""定义多个模块共用的基础数据模型。"""
+
 from __future__ import annotations
 
 from typing import Any

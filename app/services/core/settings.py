@@ -1,3 +1,5 @@
+"""定义并加载应用运行所需的统一配置。"""
+
 from __future__ import annotations
 
 import os

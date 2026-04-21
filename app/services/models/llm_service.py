@@ -1,10 +1,12 @@
+"""创建对话模型并封装统一的 LLM 调用入口。"""
+
 from __future__ import annotations
 
 import os
 from typing import Any
 
-from app.services.network import build_httpx_client
-from app.services.settings import AppSettings
+from app.services.core.network import build_httpx_client
+from app.services.core.settings import AppSettings
 
 
 def build_chat_model(
@@ -97,3 +99,4 @@ def resolve_openai_compatible_api_key(settings: AppSettings) -> str:
         if value:
             return value
     return ""
+

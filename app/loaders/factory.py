@@ -1,3 +1,5 @@
+﻿"""按文件类型选择并创建对应的加载器。"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -9,7 +11,7 @@ from typing import TYPE_CHECKING
 from langchain_core.documents import Document
 
 if TYPE_CHECKING:
-    from app.services.settings import AppSettings
+    from app.services.core.settings import AppSettings
 
 
 FILE_METADATA_BLOCKED_KEYS = {
@@ -188,3 +190,4 @@ __all__ = [
     "load_documents",
     "load_file",
 ]
+

@@ -1,1 +1,1 @@
-"""Pydantic schemas and DTOs."""
+﻿"""数据模型模块分组入口。"""

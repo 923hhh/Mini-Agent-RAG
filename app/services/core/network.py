@@ -1,3 +1,5 @@
+"""构建项目用到的 HTTP 客户端与请求会话。"""
+
 from __future__ import annotations
 
 import os

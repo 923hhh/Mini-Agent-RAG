@@ -1,3 +1,5 @@
+﻿"""定义检索阶段使用的元数据过滤条件。"""
+
 from __future__ import annotations
 
 from enum import Enum

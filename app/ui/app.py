@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import importlib
 import json
@@ -9,8 +9,8 @@ from typing import Any
 import requests
 import streamlit as st
 
-import app.services.settings as settings_module
-from app.services.image_caption_service import resolve_image_vlm_api_key
+import app.services.core.settings as settings_module
+from app.services.models.image_caption_service import resolve_image_vlm_api_key
 
 
 settings_module = importlib.reload(settings_module)
@@ -1240,3 +1240,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

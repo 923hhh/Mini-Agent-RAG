@@ -1,3 +1,5 @@
+"""生成查询改写、多查询与 HyDE 辅助内容。"""
+
 from __future__ import annotations
 
 import re
@@ -7,8 +9,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.schemas.chat import ChatMessage
-from app.services.llm_service import build_chat_model
-from app.services.settings import AppSettings
+from app.services.models.llm_service import build_chat_model
+from app.services.core.settings import AppSettings
 from app.utils.text import deduplicate_strings
 
 
@@ -430,3 +432,4 @@ def _should_skip_rewrite(query: str) -> bool:
     if "\n" not in query and compact.isascii() and len(compact) <= 24:
         return True
     return False
+

@@ -1,1 +1,1 @@
-"""Tool registry and tool implementations."""
+﻿"""工具模块分组入口。"""

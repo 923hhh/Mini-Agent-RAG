@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import sys
@@ -9,8 +9,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.kb_ingestion_service import rebuild_knowledge_base, render_rebuild_summary
-from app.services.settings import load_settings
+from app.services.kb.kb_ingestion_service import rebuild_knowledge_base, render_rebuild_summary
+from app.services.core.settings import load_settings
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,3 +77,4 @@ def render_rebuild_progress(progress: float, message: str) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

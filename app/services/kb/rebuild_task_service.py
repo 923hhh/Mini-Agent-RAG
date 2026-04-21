@@ -1,3 +1,5 @@
+"""管理知识库重建任务的提交与状态查询。"""
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -6,8 +8,8 @@ from threading import Lock
 from uuid import uuid4
 
 from app.schemas.kb import RebuildKnowledgeBaseRequest, RebuildTaskAccepted, RebuildTaskStatus
-from app.services.kb_ingestion_service import rebuild_knowledge_base
-from app.services.settings import AppSettings
+from app.services.kb.kb_ingestion_service import rebuild_knowledge_base
+from app.services.core.settings import AppSettings
 
 
 _TASK_RETENTION_HOURS = 24
@@ -160,3 +162,4 @@ def _cleanup_finished_tasks() -> None:
         while len(_tasks) > _MAX_TASK_HISTORY and finished_ordered:
             oldest = finished_ordered.pop(0)
             _tasks.pop(oldest.task_id, None)
+

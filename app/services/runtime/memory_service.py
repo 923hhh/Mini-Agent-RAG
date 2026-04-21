@@ -1,3 +1,5 @@
+"""管理 Agent 记忆的写入、检索与压缩。"""
+
 from __future__ import annotations
 
 import json
@@ -12,9 +14,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.schemas.chat import MemoryOverview
-from app.services.embedding_service import build_embeddings, embed_texts_batched
-from app.services.llm_service import build_chat_model
-from app.services.settings import AppSettings
+from app.services.models.embedding_service import build_embeddings, embed_texts_batched
+from app.services.models.llm_service import build_chat_model
+from app.services.core.settings import AppSettings
 
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -511,3 +513,4 @@ def persist_agent_turns(
             "turns_in_open_episode": meta["turns_in_open_episode"],
         },
     )
+

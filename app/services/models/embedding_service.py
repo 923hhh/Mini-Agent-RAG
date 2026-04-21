@@ -1,9 +1,11 @@
+"""创建 embedding 模型并提供批量向量化能力。"""
+
 from __future__ import annotations
 
 from typing import Any
 
-from app.services.settings import AppSettings
-from app.services.llm_service import (
+from app.services.core.settings import AppSettings
+from app.services.models.llm_service import (
     normalize_llm_provider,
     resolve_openai_compatible_api_key,
     resolve_openai_compatible_base_url,
@@ -66,3 +68,4 @@ def embed_texts_batched(
     for start in range(0, len(texts), max(1, batch_size)):
         vectors.extend(embeddings.embed_documents(texts[start : start + max(1, batch_size)]))
     return vectors
+

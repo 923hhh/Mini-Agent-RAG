@@ -1,3 +1,5 @@
+﻿"""加载纯文本与 Markdown 文档，并补充结构信息。"""
+
 from __future__ import annotations
 
 from langchain_core.documents import Document

@@ -1,3 +1,5 @@
+"""执行纠错型 Web 检索并返回标准化参考结果。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,8 +10,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 from bs4 import BeautifulSoup
 
 from app.schemas.chat import RetrievedReference
-from app.services.network import build_requests_session
-from app.services.settings import AppSettings
+from app.services.core.network import build_requests_session
+from app.services.core.settings import AppSettings
 
 
 DEFAULT_DUCKDUCKGO_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
@@ -247,3 +249,4 @@ def build_web_result_content(snippet: WebSearchSnippet) -> str:
     if snippet.snippet:
         lines.append(f"snippet: {snippet.snippet}")
     return "\n".join(lines).strip()
+

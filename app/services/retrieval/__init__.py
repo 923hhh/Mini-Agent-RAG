@@ -1,1 +1,1 @@
-"""Retrieval-related services."""
+"""检索相关服务分组。"""

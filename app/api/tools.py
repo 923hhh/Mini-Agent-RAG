@@ -1,3 +1,5 @@
+﻿"""提供工具调用与工具信息相关的 API 路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter

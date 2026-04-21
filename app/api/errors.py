@@ -1,3 +1,5 @@
+﻿"""定义 API 层统一使用的错误类型与处理。"""
+
 from __future__ import annotations
 
 from typing import Any
