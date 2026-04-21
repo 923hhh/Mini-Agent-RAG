@@ -35,6 +35,11 @@ python scripts/start_api.py
 python scripts/start_ui.py
 ```
 
+## 文档
+
+- [前端跑通 RAG 指南](docs/前端跑通RAG指南.md)
+- [后端跑通 RAG 指南](docs/后端跑通RAG指南.md)
+
 ## 常用流程
 
 1. 上传文件到知识库，或将文件放入本地知识库目录。
