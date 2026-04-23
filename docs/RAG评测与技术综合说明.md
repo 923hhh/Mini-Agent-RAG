@@ -136,7 +136,7 @@ Mini-Agent-RAG 是一个基于 FastAPI 的本地知识库检索增强生成（RA
 | CRUD-RAG | 100 条 | 项目内闭环构造，验证系统基础稳定性 |
 | DomainRAG | 100 条 | 更接近真实开放场景，暴露系统短板 |
 
-DomainRAG 包含 5 种任务类型：extractive_qa、conversation_qa、multi-doc_qa、	time-sensitive_qa、structured_qa。
+DomainRAG 包含 5 种任务类型：extractive_qa、conversation_qa、multi-doc_qa、time-sensitive_qa、structured_qa。
 
 ### 4.2 检索侧评测指标
 
@@ -169,7 +169,7 @@ DomainRAG 包含 5 种任务类型：extractive_qa、conversation_qa、multi-doc
 **解读**：
 
 - structured_qa 和 multi-doc_qa 表现最好，说明系统在结构化问题和多文档聚合上已较成熟
-- 	ime-sensitive_qa 仍然最弱，但较初始基线（0.4000/0.2050/0.2511）已有显著提升，说明时间约束保留和日期元数据优化有效
+- time-sensitive_qa 仍然最弱，但较初始基线（0.4000/0.2050/0.2511）已有显著提升，说明时间约束保留和日期元数据优化有效
 - extractive_qa 的 MRR 偏低，是后续重点优化方向
 
 ### 4.5 生成侧评测（RAGAS）
