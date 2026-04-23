@@ -71,3 +71,6 @@ Thumbs.db
 
 # mypy
 .mypy_cache/
+process.md
+优化方案.md
+
