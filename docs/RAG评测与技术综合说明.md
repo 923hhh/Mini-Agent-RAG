@@ -74,11 +74,11 @@ DomainRAG 包含 5 类任务（各20条）：extractive_qa、conversation_qa、m
 
 ### 2.3 对比实验设置
 
-| 实验类型 | 对比内容 | 目的 |
-|----------|----------|------|
-| 版本对比 | 初始基线 vs 当前稳定版 | 验证整体链路优化效果 |
-| 检索范式对比 | Dense only vs BM25 only vs Hybrid | 验证混合检索必要性 |
-| 组件对比 | bge-reranker-base vs v2-m3 | 验证重排模型差异 |
+| 实验类型　　 | 对比内容　　　　　　　　　　　　　| 目的　　　　　　　　 |
+| --------------| -----------------------------------| ----------------------|
+| 版本对比　　 | 初始基线 vs 当前稳定版　　　　　　| 验证整体链路优化效果 |
+| 检索范式对比 | Dense only vs BM25 only vs Hybrid | 验证混合检索必要性　 |
+| 组件对比　　 | bge-reranker-base vs v2-m3　　　　| 验证重排模型差异　　 |
 
 ---
 
@@ -214,11 +214,11 @@ time-sensitive_qa 已从初始 0.4000/0.2050/0.2511 提升至 0.6000/0.3183/0.38
 
 ## 附录：核心代码位置速查
 
-| 模块 | 文件路径 | 核心功能 |
-|------|----------|----------|
-| RAG 主链路 | app/chains/rag.py | 检索-生成-审校全流程 |
-| 混合检索 | app/retrievers/local_kb.py | Dense+BM25 召回、RRF 融合、双层重排 |
-| 查询改写 | app/services/retrieval/query_rewrite_service.py | 多查询生成、HyDE |
-| 句级索引 | app/services/kb/sentence_index_service.py | 句级向量索引、Small-to-Big |
-| 重排服务 | app/services/retrieval/rerank_service.py | 模型重排 |
-| 评测构造 | app/services/evaluation/ | CRUD-RAG 评测样本构造 |
+| 模块　　　 | 文件路径　　　　　　　　　　　　　　　　　　　　| 核心功能　　　　　　　　　　　　　　|
+| ------------| -------------------------------------------------| -------------------------------------|
+| RAG 主链路 | app/chains/rag.py　　　　　　　　　　　　　　　 | 检索-生成-审校全流程　　　　　　　　|
+| 混合检索　 | app/retrievers/local_kb.py　　　　　　　　　　　| Dense+BM25 召回、RRF 融合、双层重排 |
+| 查询改写　 | app/services/retrieval/query_rewrite_service.py | 多查询生成、HyDE　　　　　　　　　　|
+| 句级索引　 | app/services/kb/sentence_index_service.py　　　 | 句级向量索引、Small-to-Big　　　　　|
+| 重排服务　 | app/services/retrieval/rerank_service.py　　　　| 模型重排　　　　　　　　　　　　　　|
+| 评测构造　 | app/services/evaluation/　　　　　　　　　　　　| CRUD-RAG 评测样本构造　　　　　　　 |
