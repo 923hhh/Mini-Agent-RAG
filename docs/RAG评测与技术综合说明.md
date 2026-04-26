@@ -32,7 +32,7 @@ Mini-Agent-RAG 是一个面向高校文档问答的增强型 RAG 系统，采用
           句级索引/Small-to-Big  多模态证据组织  LLM 生成  完备性/事实审校  输出
 ```
 
-**可编辑流程图**：[`rag_v1.drawio`](../rag_v1.drawio)
+![RAG 主链路流程图](../rag_v1.drawio.png)
 
 ### 1.3 核心配置
 
