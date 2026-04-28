@@ -100,6 +100,7 @@ DomainRAG 包含 5 类任务（各20条）：extractive_qa、conversation_qa、m
 
 #### DomainRAG 全量语料本地评测
 
+**报告文件**：[`../data/eval/domainrag_full_local_eval.json`](../data/eval/domainrag_full_local_eval.json)
 | 数据集 | 样本口径 | Recall@5 | MRR | NDCG@5 | Hit@1 | Hit@10 |
 |--------|----------|----------|-----|--------|-------|--------|
 | DomainRAG Local KB | 203 条可对齐样本 | 0.4877 | 0.4200 | 0.4032 | 0.3842 | 0.5123 |
