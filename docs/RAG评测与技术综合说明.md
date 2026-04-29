@@ -1,6 +1,6 @@
 ﻿# Mini-Agent-RAG：RAG 系统评测与技术说明
 
-> 初版时间：2026-04-17 | 最近更新：2026-04-27
+> 初版时间：2026-04-17 | 最近更新：2026-04-29
 
 ---
 
@@ -96,6 +96,41 @@ DomainRAG 包含 5 类任务（各20条）：extractive_qa、conversation_qa、m
 
 **提升幅度**：MRR +0.1078，NDCG +0.1143，说明增强型 Hybrid 链路有效。
 
+### 3.1.1 本地知识库最新评测结果
+
+#### DomainRAG 全量语料本地评测
+
+**报告文件**：[`../data/eval/domain/domainrag_full_local_eval.json`](../data/eval/domain/domainrag_full_local_eval.json)
+
+| 数据集 | 样本口径 | Recall@5 | MRR | NDCG@5 | Hit@1 | Hit@10 |
+|--------|----------|----------|-----|--------|-------|--------|
+| DomainRAG Local KB | 203 条可对齐样本 | 0.4877 | 0.4200 | 0.4032 | 0.3842 | 0.5123 |
+
+按任务拆分后：
+
+| 任务类型 | Recall@5 | MRR | NDCG@5 | Hit@5 | All Positive Covered@10 |
+|----------|----------|-----|--------|-------|--------------------------|
+| extractive_qa | 0.4889 | 0.4019 | 0.4231 | 0.4889 | 0.5111 |
+| multi-doc_qa | 0.4375 | 0.3767 | 0.2501 | 0.4375 | 0.1250 |
+| time-sensitive_qa | 0.5231 | 0.4769 | 0.4886 | 0.5231 | 0.5692 |
+
+这组结果说明：本地主链路已经能够稳定完成 DomainRAG 检索评测，但当前主要短板仍集中在 `multi-doc_qa` 的多证据覆盖和前排排序质量。
+
+#### CRUD 3QA 本地知识库 100 条标准检索评测
+
+**报告文件**：[`../data/eval/crud_rag_3qa_full_local_eval_100.json`](../data/eval/crud_rag_3qa_full_local_eval_100.json)
+
+| 数据集 | 样本口径 | Recall@5 | MRR | NDCG@5 | Hit@1 | Hit@5 |
+|--------|----------|----------|-----|--------|-------|--------|
+| CRUD 3QA Local KB | 100 条标准检索样本 | 1.0000 | 1.0000 | 0.5277 | 1.0000 | 1.0000 |
+
+补充指标：
+
+| 数据集 | all_expected_covered_at_5 | 说明 |
+|--------|---------------------------|------|
+| CRUD 3QA Local KB | 1.0000 | 每条样本的 3 个 `expected_references` 均能在 Top5 内覆盖 |
+
+结果表明：当前系统在 `CRUD 3QA` 这一项目内闭环场景下，能够稳定把正确证据召回到前列；但 `NDCG@5 = 0.5277` 也说明，虽然命中率很高，多条 gold evidence 的整体排序次序仍有继续优化空间。
 ### 3.2 检索范式对比（Domain 100）
 
 | 方法 | Recall@5 | MRR | NDCG@5 |
