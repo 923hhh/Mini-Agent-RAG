@@ -116,13 +116,13 @@ DomainRAG 包含 5 类任务（各20条）：extractive_qa、conversation_qa、m
 
 这组结果说明：本地主链路已经能够稳定完成 DomainRAG 检索评测，但当前主要短板仍集中在 `multi-doc_qa` 的多证据覆盖和前排排序质量。
 
-#### CRUD 3QA 本地知识库 100 条标准检索评测
+#### CRUD 3QA 本地知识库 1000 条标准检索评测
 
-**报告文件**：[`../data/eval/crud_rag_3qa_full_local_eval_100.json`](../data/eval/crud_rag_3qa_full_local_eval_100.json)
+**报告文件**：[`../data/eval/crud_rag_3qa_full_local_eval_1000.json`](../data/eval/crud_rag_3qa_full_local_eval_1000.json)
 
 | 数据集 | 样本口径 | Recall@5 | MRR | NDCG@5 | Hit@1 | Hit@5 |
 |--------|----------|----------|-----|--------|-------|--------|
-| CRUD 3QA Local KB | 100 条标准检索样本 | 1.0000 | 1.0000 | 0.5277 | 1.0000 | 1.0000 |
+| CRUD 3QA Local KB | 1000 条标准检索样本 | 1.0000 | 1.0000 | 0.5277 | 1.0000 | 1.0000 |
 
 补充指标：
 
