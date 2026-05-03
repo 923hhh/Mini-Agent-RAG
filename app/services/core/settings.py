@@ -47,6 +47,7 @@ class KBSettings(BaseModel):
     ENABLE_MULTI_QUERY_RETRIEVAL: bool = True
     ENABLE_HYDE: bool = False
     ENABLE_HYBRID_RETRIEVAL: bool = True
+    ENABLE_TIMESERIES_RETRIEVAL_EXTENSION: bool = True
     ENABLE_CORRECTIVE_RAG: bool = False
     ENABLE_CORRECTIVE_WEB_SEARCH: bool = False
     ENABLE_HEURISTIC_RERANK: bool = True
@@ -108,6 +109,7 @@ class KBSettings(BaseModel):
         default_factory=lambda: [
             ".txt",
             ".md",
+            ".json",
             ".pdf",
             ".docx",
             ".epub",

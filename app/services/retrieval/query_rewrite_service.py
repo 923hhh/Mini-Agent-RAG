@@ -66,6 +66,12 @@ class TemporalConstraintProfile:
     slot_phrases: tuple[str, ...]
     keep_keywords: tuple[str, ...]
 
+
+@dataclass(frozen=True)
+class ComparativeEntityProfile:
+    is_multi_entity_comparative: bool
+    entity_names: tuple[str, ...]
+
 QUERY_REWRITE_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
@@ -147,6 +153,8 @@ def generate_multi_queries(
     normalized_query = query.strip()
     if not normalized_query:
         return []
+    if build_comparative_entity_profile(normalized_query).is_multi_entity_comparative:
+        return [normalized_query]
     if not settings.kb.ENABLE_QUERY_REWRITE or _should_skip_rewrite(normalized_query):
         return [normalized_query]
 
@@ -333,6 +341,9 @@ def normalize_candidate_query(text: str, original_query: str) -> str:
     cleaned = enforce_temporal_constraints(cleaned, original_query)
     if not cleaned:
         return ""
+    cleaned = enforce_comparative_entity_constraints(cleaned, original_query)
+    if not cleaned:
+        return ""
     if len(cleaned) > max(96, len(original_query) * 2):
         return ""
     return cleaned
@@ -351,6 +362,22 @@ def deduplicate_query_candidates(
         if normalized:
             queries.append(normalized)
     return deduplicate_strings(queries)[:limit]
+
+
+def enforce_comparative_entity_constraints(candidate: str, original_query: str) -> str:
+    cleaned_candidate = candidate.strip()
+    cleaned_original = original_query.strip()
+    if not cleaned_candidate or not cleaned_original:
+        return cleaned_candidate
+
+    profile = build_comparative_entity_profile(cleaned_original)
+    if not profile.is_multi_entity_comparative:
+        return cleaned_candidate
+
+    missing_entities = [name for name in profile.entity_names if name not in cleaned_candidate]
+    if not missing_entities:
+        return cleaned_candidate
+    return ""
 
 
 def enforce_temporal_constraints(candidate: str, original_query: str) -> str:
@@ -405,6 +432,52 @@ def build_temporal_constraint_profile(query: str) -> TemporalConstraintProfile:
         slot_phrases=slot_phrases,
         keep_keywords=keep_keywords,
     )
+
+
+def build_comparative_entity_profile(query: str) -> ComparativeEntityProfile:
+    stripped = query.strip()
+    if not stripped:
+        return ComparativeEntityProfile(False, ())
+
+    comparative_markers = (
+        "共同",
+        "区别",
+        "不同",
+        "相同",
+        "相似",
+        "异同",
+        "差异",
+        "比较",
+        "对比",
+    )
+    relation_markers = ("与", "和", "及", "以及")
+    has_comparative = any(marker in stripped for marker in comparative_markers)
+    has_relation = any(marker in stripped for marker in relation_markers)
+    if not has_comparative or not has_relation:
+        return ComparativeEntityProfile(False, ())
+
+    entity_names = extract_comparative_professional_entities(stripped)
+    if len(entity_names) < 2:
+        return ComparativeEntityProfile(False, ())
+    return ComparativeEntityProfile(True, entity_names)
+
+
+def extract_comparative_professional_entities(query: str) -> tuple[str, ...]:
+    stripped = query.strip()
+    if not stripped or "专业" not in stripped:
+        return ()
+
+    prefix = stripped.split("专业", 1)[0]
+    relation_match = re.search(r"(与|和|及|以及)", prefix)
+    if relation_match:
+        left = prefix[: relation_match.start()].strip(" ，,。；;？?")
+        right = prefix[relation_match.end() :].strip(" ，,。；;？?")
+        entities = [item for item in (f"{left}专业" if left else "", f"{right}专业" if right else "") if item]
+        if len(entities) >= 2:
+            return tuple(deduplicate_strings(entities)[:2])
+
+    entities = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+?专业", stripped)
+    return tuple(deduplicate_strings(entities)[:2])
 
 
 def deduplicate_inline_terms(text: str) -> str:

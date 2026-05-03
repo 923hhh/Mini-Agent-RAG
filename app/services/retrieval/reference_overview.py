@@ -11,6 +11,7 @@ def build_reference_overview(
     source_modality_counts: dict[str, int] = {}
     evidence_type_counts: dict[str, int] = {}
     text_count = 0
+    timeseries_count = 0
     image_side_count = 0
     multimodal_count = 0
 
@@ -20,7 +21,9 @@ def build_reference_overview(
         source_modality_counts[source_modality] = source_modality_counts.get(source_modality, 0) + 1
         evidence_type_counts[evidence_type] = evidence_type_counts.get(evidence_type, 0) + 1
 
-        if evidence_type == "text" or source_modality == "text":
+        if source_modality == "timeseries":
+            timeseries_count += 1
+        elif evidence_type == "text" or source_modality == "text":
             text_count += 1
         if evidence_type in {"ocr", "vision", "multimodal"} or source_modality in {
             "ocr",
@@ -35,9 +38,11 @@ def build_reference_overview(
     return ReferenceOverview(
         reference_count=len(references),
         text_count=text_count,
+        timeseries_count=timeseries_count,
         image_side_count=image_side_count,
         multimodal_count=multimodal_count,
         has_joint_text_image_coverage=text_count > 0 and image_side_count > 0,
+        has_text_ts_joint_coverage=text_count > 0 and timeseries_count > 0,
         source_modality_counts=source_modality_counts,
         evidence_type_counts=evidence_type_counts,
     )
