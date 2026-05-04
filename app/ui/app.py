@@ -778,25 +778,33 @@ def render_reference_summary(
 ) -> None:
     summary = normalize_reference_overview(reference_overview) or summarize_references(references)
     text_count = summary["text_count"]
+    timeseries_count = summary["timeseries_count"]
     image_side_count = summary["image_side_count"]
     multimodal_count = summary["multimodal_count"]
     has_joint_coverage = summary["has_joint_text_image_coverage"]
+    has_text_ts_joint_coverage = summary["has_text_ts_joint_coverage"]
 
     st.markdown("#### 证据概览")
-    col_text, col_image, col_joint = st.columns(3)
+    col_text, col_ts, col_image, col_joint = st.columns(4)
     with col_text:
         st.metric("文本证据", int(text_count))
+    with col_ts:
+        st.metric("时间序列证据", int(timeseries_count))
     with col_image:
         st.metric("图片侧证据", int(image_side_count))
     with col_joint:
-        st.metric("联合覆盖", "是" if has_joint_coverage else "否")
+        st.metric("文TS联合", "是" if has_text_ts_joint_coverage else "否")
 
-    if has_joint_coverage:
+    if has_text_ts_joint_coverage:
+        st.success("本次检索已同时命中文本证据和时间序列证据。")
+    elif has_joint_coverage:
         st.success("本次检索已同时命中文本证据和图片侧证据。")
+    elif timeseries_count > 0:
+        st.info("当前引用包含时间序列证据，但未形成文本 + 时间序列的联合覆盖。")
     elif image_side_count > 0:
         st.info("当前引用包含图片侧证据，但未形成文本 + 图片的联合覆盖。")
     else:
-        st.info("当前引用以文本证据为主，未包含图片侧证据。")
+        st.info("当前引用以文本证据为主，未包含时间序列或图片侧证据。")
 
     modality_summary = format_reference_distribution(summary["source_modality_counts"])
     evidence_summary = format_reference_distribution(summary["evidence_type_counts"])
@@ -812,6 +820,7 @@ def summarize_references(references: list[dict[str, Any]]) -> dict[str, Any]:
     source_modality_counts: dict[str, int] = {}
     evidence_type_counts: dict[str, int] = {}
     text_count = 0
+    timeseries_count = 0
     image_side_count = 0
     multimodal_count = 0
 
@@ -821,7 +830,9 @@ def summarize_references(references: list[dict[str, Any]]) -> dict[str, Any]:
         source_modality_counts[source_modality] = source_modality_counts.get(source_modality, 0) + 1
         evidence_type_counts[evidence_type] = evidence_type_counts.get(evidence_type, 0) + 1
 
-        if evidence_type == "text" or source_modality == "text":
+        if source_modality == "timeseries":
+            timeseries_count += 1
+        elif evidence_type == "text" or source_modality == "text":
             text_count += 1
         if evidence_type in {"ocr", "vision", "multimodal"} or source_modality in {"ocr", "vision", "ocr+vision", "image"}:
             image_side_count += 1
@@ -830,9 +841,11 @@ def summarize_references(references: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "text_count": text_count,
+        "timeseries_count": timeseries_count,
         "image_side_count": image_side_count,
         "multimodal_count": multimodal_count,
         "has_joint_text_image_coverage": text_count > 0 and image_side_count > 0,
+        "has_text_ts_joint_coverage": text_count > 0 and timeseries_count > 0,
         "source_modality_counts": source_modality_counts,
         "evidence_type_counts": evidence_type_counts,
     }
@@ -845,9 +858,11 @@ def normalize_reference_overview(
         return None
     return {
         "text_count": int(overview.get("text_count", 0) or 0),
+        "timeseries_count": int(overview.get("timeseries_count", 0) or 0),
         "image_side_count": int(overview.get("image_side_count", 0) or 0),
         "multimodal_count": int(overview.get("multimodal_count", 0) or 0),
         "has_joint_text_image_coverage": bool(overview.get("has_joint_text_image_coverage", False)),
+        "has_text_ts_joint_coverage": bool(overview.get("has_text_ts_joint_coverage", False)),
         "source_modality_counts": dict(overview.get("source_modality_counts", {}) or {}),
         "evidence_type_counts": dict(overview.get("evidence_type_counts", {}) or {}),
     }

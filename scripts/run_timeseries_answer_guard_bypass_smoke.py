@@ -26,6 +26,7 @@ OUTPUT_PATH = (
     / "timeseries"
     / "timeseries_answer_guard_bypass_smoke.json"
 )
+ASSET_ROOT = "data/eval/timeseries/assets"
 
 
 def build_test_references() -> list[RetrievedReference]:
@@ -33,7 +34,7 @@ def build_test_references() -> list[RetrievedReference]:
         RetrievedReference(
             chunk_id="ts-1",
             source="air_quality_series_clean_u.json#beijing_pm25_clean_u",
-            source_path="data/eval/timeseries_minimal_assets/air_quality_series_clean_u.json",
+            source_path=f"{ASSET_ROOT}/air_quality_series_clean_u.json",
             extension=".json",
             title="beijing_pm25_clean_u",
             source_modality="timeseries",
@@ -46,7 +47,7 @@ def build_test_references() -> list[RetrievedReference]:
         RetrievedReference(
             chunk_id="txt-1",
             source="event_background_clean_u.txt",
-            source_path="data/eval/timeseries_minimal_assets/event_background_clean_u.txt",
+            source_path=f"{ASSET_ROOT}/event_background_clean_u.txt",
             extension=".txt",
             title="event_background_clean_u",
             source_modality="text",
@@ -93,9 +94,6 @@ def main() -> int:
             query,
             references,
             [],
-            is_multi_doc_comparative=False,
-            should_direct_answer=False,
-            requirement_count=1,
         ),
     }
     disabled_payload = {
@@ -120,9 +118,6 @@ def main() -> int:
             query,
             references,
             [],
-            is_multi_doc_comparative=False,
-            should_direct_answer=False,
-            requirement_count=1,
         ),
     }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from app.schemas.chat import RetrievedReference
+from app.services.retrieval.query_answer_policy_service import QueryAnswerPolicy
 
 
 def resolve_reference_context_group(ref: RetrievedReference) -> str:
@@ -27,19 +28,23 @@ def resolve_reference_context_group(ref: RetrievedReference) -> str:
 def resolve_reference_content_limit(
     *,
     context_group: str,
-    is_multi_doc_comparative: bool,
-    should_direct_answer: bool,
-    requirement_count: int,
+    policy: QueryAnswerPolicy,
 ) -> int:
     if context_group == "timeseries":
         return 260
     if context_group in {"ocr", "vision"}:
         return 220
-    if is_multi_doc_comparative:
+    if policy.is_procedural:
+        return 320
+    if policy.is_symbol_explanation:
+        return 360
+    if policy.is_numeric_fact:
+        return 220
+    if policy.is_multi_doc_comparative:
         return 260
-    if should_direct_answer:
+    if policy.should_direct_answer:
         return 120
-    if requirement_count > 1:
+    if policy.requirement_count > 1:
         return 220
     return 160
 
@@ -89,14 +94,15 @@ def format_reference_block(
         evidence_lines.append(
             f"image_caption: {clip_prompt_snippet(ref.image_caption, min(240, snippet_limit))}"
         )
+    content_source = ref.content or ref.content_preview
     if ref.evidence_summary:
         content_text = clip_prompt_snippet(
-            ref.content_preview or ref.content,
+            content_source,
             max(120, snippet_limit),
         )
     else:
         content_text = clip_prompt_snippet(
-            ref.content_preview or ref.content,
+            content_source,
             snippet_limit,
         )
     evidence_lines.append(f"content:\n{content_text}")

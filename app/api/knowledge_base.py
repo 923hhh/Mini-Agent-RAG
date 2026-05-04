@@ -13,12 +13,13 @@ from app.schemas.kb import (
     RebuildTaskAccepted,
     RebuildTaskStatus,
 )
-from app.services.kb.kb_ingestion_service import (
+from app.services.kb import (
+    get_rebuild_task,
     list_knowledge_bases,
+    submit_rebuild_task,
     upload_local_files,
     upload_temp_files,
 )
-from app.services.kb.rebuild_task_service import get_rebuild_task, submit_rebuild_task
 
 
 router = APIRouter(prefix="/knowledge_base", tags=["knowledge_base"])

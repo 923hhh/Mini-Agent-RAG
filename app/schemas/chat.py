@@ -37,6 +37,13 @@ class RetrievedDoc(BaseModel):
     ocr_text: str | None = None
     image_caption: str | None = None
     evidence_summary: str | None = None
+    series_id: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    ts_summary: str | None = None
+    event_type: str | None = None
+    location: str | None = None
+    channel_names: list[str] = Field(default_factory=list)
     headers: dict[str, str] = Field(default_factory=dict)
     content: str
     content_preview: str
@@ -53,9 +60,11 @@ class ReferenceOverview(BaseModel):
 
     reference_count: int = 0
     text_count: int = 0
+    timeseries_count: int = 0
     image_side_count: int = 0
     multimodal_count: int = 0
     has_joint_text_image_coverage: bool = False
+    has_text_ts_joint_coverage: bool = False
     source_modality_counts: dict[str, int] = Field(default_factory=dict)
     evidence_type_counts: dict[str, int] = Field(default_factory=dict)
 

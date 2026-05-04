@@ -29,9 +29,38 @@ class DocumentChunk(BaseModel):
     ocr_language: str | None = None
     image_caption: str | None = None
     evidence_summary: str | None = None
+    series_id: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    ts_summary: str | None = None
+    event_type: str | None = None
+    location: str | None = None
+    channel_names: list[str] = Field(default_factory=list)
     headers: dict[str, str] = Field(default_factory=dict)
     content_length: int
     content_preview: str
+
+
+class TimeSeriesPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: str = Field(min_length=1)
+    values: dict[str, float] = Field(default_factory=dict)
+
+
+class TimeSeriesKnowledgeUnit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    series_id: str = Field(min_length=1)
+    start_time: str = Field(min_length=1)
+    end_time: str = Field(min_length=1)
+    location: str | None = None
+    event_type: str | None = None
+    channel_names: list[str] = Field(default_factory=list)
+    ts_summary: str | None = None
+    description: str | None = None
+    event_background: str | None = None
+    points: list[TimeSeriesPoint] = Field(default_factory=list)
 
 
 class DocumentChunkRecord(DocumentChunk):

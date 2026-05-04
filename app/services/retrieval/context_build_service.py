@@ -9,22 +9,21 @@ from app.services.retrieval.evidence_packing_service import (
     resolve_reference_content_limit,
     resolve_reference_context_group,
 )
+from app.services.retrieval.query_answer_policy_service import QueryAnswerPolicy
 
 
 def build_context(
     query: str,
     references: list[RetrievedReference],
     *,
-    is_multi_doc_comparative: bool,
-    should_direct_answer: bool,
-    requirement_count: int,
+    policy: QueryAnswerPolicy,
 ) -> str:
     if not references:
         return ""
 
     prompt_references = deduplicate_references_for_prompt(
         references,
-        prefer_content_detail=is_multi_doc_comparative,
+        prefer_content_detail=policy.is_multi_doc_comparative,
         max_items=resolve_prompt_reference_limit(query, references),
     )
 
@@ -43,9 +42,7 @@ def build_context(
                 ref,
                 snippet_limit=resolve_reference_content_limit(
                     context_group=context_group,
-                    is_multi_doc_comparative=is_multi_doc_comparative,
-                    should_direct_answer=should_direct_answer,
-                    requirement_count=requirement_count,
+                    policy=policy,
                 ),
             )
         )

@@ -21,7 +21,7 @@ from app.services.runtime.temp_kb_service import cleanup_temp_knowledge_bases
 
 DEFAULT_CASES_PATH = PROJECT_ROOT / "data" / "eval" / "timeseries" / "timeseries_minimal_cases_20260426.jsonl"
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "eval" / "timeseries" / "timeseries_extension_bypass_smoke.json"
-ASSET_DIR = PROJECT_ROOT / "data" / "eval" / "timeseries_minimal_assets"
+ASSET_DIR = PROJECT_ROOT / "data" / "eval" / "timeseries" / "assets"
 
 
 def parse_args() -> argparse.Namespace:

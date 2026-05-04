@@ -12,10 +12,7 @@ from app.services.core.settings import AppSettings
 from app.services.models.llm_service import build_chat_model
 from app.services.models.streaming_llm import stream_prompt_output
 from app.services.retrieval.answer_guard_service import (
-    is_multi_doc_comparative_query,
     maybe_refine_rag_answer,
-    should_directly_answer_query,
-    split_query_into_requirements,
 )
 from app.services.runtime.rag_runtime_service import (
     RetrievalCoverageGrade,
@@ -139,6 +136,7 @@ RAG_FACTUAL_REVIEW_PROMPT = ChatPromptTemplate.from_messages(
 
 
 def _prepare_rag_invocation(
+    settings: AppSettings,
     query: str,
     references: list[RetrievedReference],
     history: list[ChatMessage],
@@ -157,9 +155,6 @@ def _prepare_rag_invocation(
         query,
         references,
         history,
-        is_multi_doc_comparative=is_multi_doc_comparative_query(query),
-        should_direct_answer=should_directly_answer_query(query),
-        requirement_count=len(split_query_into_requirements(query)),
         agent_memory_context=agent_memory_context,
     )
     return prompt_kind, prompt, variables
@@ -172,6 +167,7 @@ def generate_rag_answer(
     agent_memory_context: str = "",
 ) -> str:
     prompt_kind, prompt, variables = _prepare_rag_invocation(
+        settings,
         query,
         references,
         history,
@@ -209,6 +205,7 @@ def stream_rag_answer(
     agent_memory_context: str = "",
 ) -> Iterator[str]:
     prompt_kind, prompt, variables = _prepare_rag_invocation(
+        settings,
         query,
         references,
         history,

@@ -7,6 +7,7 @@ from .image import FigureBandSpec, ImageKnowledge, ImageRegionSpec, InstructionP
 from .office import DocxKnowledge, EpubKnowledge
 from .pdf import PdfKnowledge, PdfOutlineSection
 from .text import MarkdownKnowledge, TextKnowledge
+from .timeseries import TimeSeriesKnowledge
 
 __all__ = [
     "BaseKnowledge",
@@ -16,6 +17,7 @@ __all__ = [
     "load_file",
     "TextKnowledge",
     "MarkdownKnowledge",
+    "TimeSeriesKnowledge",
     "PdfKnowledge",
     "PdfOutlineSection",
     "DocxKnowledge",

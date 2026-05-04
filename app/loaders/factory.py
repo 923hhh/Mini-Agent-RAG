@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import json
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from langchain_core.documents import Document
 
+from .metadata import load_sidecar_file_metadata
+from .registry import get_knowledge_registry
+
 if TYPE_CHECKING:
     from app.services.core.settings import AppSettings
 
 
-FILE_METADATA_BLOCKED_KEYS = {
-    "source",
-    "source_path",
-    "relative_path",
-    "extension",
+LOADER_EXCLUDED_FILENAMES = {
+    ".rag_file_metadata.json",
 }
 
 
@@ -63,19 +61,7 @@ class BaseKnowledge(ABC):
 class KnowledgeFactory:
     @classmethod
     def _registry(cls) -> list[type[BaseKnowledge]]:
-        from .image import ImageKnowledge
-        from .office import DocxKnowledge, EpubKnowledge
-        from .pdf import PdfKnowledge
-        from .text import MarkdownKnowledge, TextKnowledge
-
-        return [
-            MarkdownKnowledge,
-            TextKnowledge,
-            PdfKnowledge,
-            DocxKnowledge,
-            EpubKnowledge,
-            ImageKnowledge,
-        ]
+        return get_knowledge_registry()
 
     @classmethod
     def create(
@@ -103,7 +89,11 @@ def list_supported_files(content_dir: Path, supported_extensions: list[str]) -> 
     normalized = {ext.lower() for ext in supported_extensions}
     files: list[Path] = []
     for path in content_dir.rglob("*"):
-        if path.is_file() and path.suffix.lower() in normalized:
+        if (
+            path.is_file()
+            and path.suffix.lower() in normalized
+            and path.name not in LOADER_EXCLUDED_FILENAMES
+        ):
             files.append(path)
     return sorted(files)
 
@@ -128,59 +118,6 @@ def load_file(
     settings: "AppSettings | None" = None,
 ) -> list[Document]:
     return KnowledgeFactory.load(path, content_dir, settings=settings)
-
-
-def load_sidecar_file_metadata(content_dir: Path, relative_path: str) -> dict[str, str]:
-    metadata_map = load_sidecar_metadata_map(content_dir)
-    raw_payload = metadata_map.get(relative_path, {})
-    sanitized: dict[str, str] = {}
-    for key, value in raw_payload.items():
-        normalized_key = str(key).strip()
-        if not normalized_key or normalized_key in FILE_METADATA_BLOCKED_KEYS:
-            continue
-        sanitized[normalized_key] = str(value).strip()
-    return sanitized
-
-
-def load_sidecar_metadata_map(content_dir: Path) -> dict[str, dict[str, str]]:
-    metadata_path = content_dir / ".rag_file_metadata.json"
-    if not metadata_path.exists():
-        return {}
-
-    stat = metadata_path.stat()
-    return _load_sidecar_metadata_map_cached(
-        str(metadata_path.resolve()),
-        stat.st_mtime_ns,
-        stat.st_size,
-    )
-
-
-@lru_cache(maxsize=16)
-def _load_sidecar_metadata_map_cached(
-    metadata_path_str: str,
-    _mtime_ns: int,
-    _size: int,
-) -> dict[str, dict[str, str]]:
-    metadata_path = Path(metadata_path_str)
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-    raw_files = payload.get("files")
-    if not isinstance(raw_files, dict):
-        return {}
-
-    normalized: dict[str, dict[str, str]] = {}
-    for relative_path, raw_metadata in raw_files.items():
-        if not isinstance(raw_metadata, dict):
-            continue
-        normalized[str(relative_path)] = {
-            str(key): str(value)
-            for key, value in raw_metadata.items()
-            if value is not None
-        }
-    return normalized
 
 
 __all__ = [

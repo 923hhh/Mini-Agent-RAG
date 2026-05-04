@@ -21,11 +21,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
+try:
+    from scripts.eval_common import PROJECT_ROOT, load_jsonl as load_jsonl_common, write_json_report
+except ModuleNotFoundError:
+    from eval_common import PROJECT_ROOT, load_jsonl as load_jsonl_common, write_json_report
 from app.retrievers.local_kb import search_local_knowledge_base
 from app.services.core.settings import load_settings
 
@@ -85,11 +84,7 @@ def resolve_cases_file(knowledge_base_name: str, explicit: Path | None) -> Path:
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8-sig").splitlines()
-        if line.strip()
-    ]
+    return load_jsonl_common(path, encoding="utf-8-sig")
 
 
 def normalize_space(text: object) -> str:
@@ -450,7 +445,7 @@ def main() -> int:
         "results": results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_report(args.output, payload)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"[done] output: {args.output}")
     return 0

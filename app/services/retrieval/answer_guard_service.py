@@ -43,6 +43,14 @@ def build_coverage_requirements(
             for item in timeseries_points:
                 if item not in lines:
                     lines.append(item)
+    if is_procedural_query(normalized) and has_numbered_step_references(references or []):
+        procedural_points = [
+            "完整覆盖上下文中已经给出的操作步骤",
+            "不要遗漏后续编号步骤、注意事项或取下部件清单",
+        ]
+        for item in procedural_points:
+            if item not in lines:
+                lines.append(item)
     if not lines:
         return ""
     return "【回答覆盖要求】\n- " + "\n- ".join(lines) + "\n\n"
@@ -65,6 +73,11 @@ def build_answer_requirements(
         lines.append("若涉及多个对象，必须逐项对照说明，不得只给笼统总结。")
     if is_temporal_answer_query(normalized):
         lines.append("回答中必须保留具体时间点、年份或日期，不要弱化时间条件。")
+    if is_procedural_query(normalized):
+        lines.append("若上下文包含编号步骤，必须按原编号顺序完整列出，不得擅自截断或合并后续步骤。")
+        lines.append("不要写“上下文未完整列出”“具体内容略”等保守性说明，除非证据确实缺失。")
+        if has_numbered_step_references(references or []):
+            lines.append("优先保留原文中的部件名、螺栓规格、数量和提示信息，不要只做笼统概括。")
     if (
         is_timeseries_answer_guard_enabled(settings)
         and has_timeseries_references(references or [])
@@ -247,6 +260,83 @@ def should_directly_answer_query(query: str) -> bool:
         "最新",
     )
     return any(marker in normalized for marker in direct_markers)
+
+
+def is_procedural_query(query: str) -> bool:
+    normalized = extract_primary_question_text(query)
+    if not normalized:
+        return False
+    procedural_markers = (
+        "步骤",
+        "流程",
+        "如何",
+        "怎么",
+        "怎样",
+        "拆卸",
+        "安装",
+        "更换",
+        "检查",
+        "测量",
+        "调整",
+        "操作",
+    )
+    return any(marker in normalized for marker in procedural_markers)
+
+
+def is_numeric_fact_query(query: str) -> bool:
+    normalized = extract_primary_question_text(query)
+    if not normalized:
+        return False
+    numeric_markers = (
+        "多少",
+        "几",
+        "数值",
+        "标准值",
+        "范围",
+        "扭矩",
+        "压力",
+        "间隙",
+        "规格",
+        "尺寸",
+        "厚度",
+        "温度",
+        "电压",
+        "电流",
+    )
+    return any(marker in normalized for marker in numeric_markers)
+
+
+def is_symbol_explanation_query(query: str) -> bool:
+    normalized = extract_primary_question_text(query)
+    if not normalized:
+        return False
+    explanation_markers = (
+        "分别表示什么",
+        "表示什么",
+        "分别代表什么",
+        "代表什么",
+        "含义是什么",
+        "什么意思",
+    )
+    if any(marker in normalized for marker in explanation_markers):
+        return True
+    symbol_markers = ("IN", "EX", "L", "M", "A", "B", "C", "D")
+    upper = normalized.upper()
+    symbol_count = sum(1 for marker in symbol_markers if marker in upper)
+    return symbol_count >= 2
+
+
+def has_numbered_step_references(references: list[RetrievedReference]) -> bool:
+    numbered_line_count = 0
+    for ref in references:
+        text = str(ref.content or "")
+        for line in text.splitlines():
+            normalized = line.strip()
+            if re.match(r"^\d+[.、]\s*", normalized):
+                numbered_line_count += 1
+                if numbered_line_count >= 2:
+                    return True
+    return False
 
 
 def is_multi_doc_comparative_query(query: str) -> bool:
@@ -505,7 +595,9 @@ def should_run_answer_completeness_review(
         return True
 
     checklist_hints = ("哪些", "哪几", "分别", "同时", "以及", "角色", "原因", "措施", "步骤", "职责")
-    return any(hint in query for hint in checklist_hints)
+    if any(hint in query for hint in checklist_hints):
+        return True
+    return is_procedural_query(query)
 
 
 def should_run_answer_factual_review(

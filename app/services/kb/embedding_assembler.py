@@ -201,6 +201,17 @@ def attach_chunk_metadata(chunks: list[Document]) -> list[DocumentChunkRecord]:
                 ocr_language=coerce_optional_text(chunk.metadata.get("ocr_language")),
                 image_caption=coerce_optional_text(chunk.metadata.get("image_caption")),
                 evidence_summary=coerce_optional_text(chunk.metadata.get("evidence_summary")),
+                series_id=coerce_optional_text(chunk.metadata.get("series_id")),
+                start_time=coerce_optional_text(chunk.metadata.get("start_time")),
+                end_time=coerce_optional_text(chunk.metadata.get("end_time")),
+                ts_summary=coerce_optional_text(chunk.metadata.get("ts_summary")),
+                event_type=coerce_optional_text(chunk.metadata.get("event_type")),
+                location=coerce_optional_text(chunk.metadata.get("location")),
+                channel_names=[
+                    str(item).strip()
+                    for item in (chunk.metadata.get("channel_names") or [])
+                    if str(item).strip()
+                ],
                 headers=headers,
                 content_length=len(chunk.page_content),
                 content_preview=chunk.page_content[:120],

@@ -18,7 +18,6 @@ from app.services.retrieval.answer_guard_service import (
     build_answer_requirements,
     build_coverage_requirements,
     is_temporal_answer_query,
-    should_directly_answer_query,
     split_query_into_requirements,
 )
 from app.services.retrieval.context_build_service import build_context
@@ -27,6 +26,7 @@ from app.services.retrieval.evidence_packing_service import (
     count_reference_attribute,
     resolve_reference_context_group,
 )
+from app.services.retrieval.query_answer_policy_service import build_query_answer_policy
 from app.services.retrieval.query_rewrite_service import format_history, sanitize_rewritten_query
 from app.services.retrieval.reference_overview import build_reference_overview
 
@@ -118,11 +118,9 @@ def build_rag_variables(
     references: list[RetrievedReference],
     history: list[ChatMessage],
     *,
-    is_multi_doc_comparative: bool,
-    should_direct_answer: bool,
-    requirement_count: int,
     agent_memory_context: str = "",
 ) -> dict[str, object]:
+    policy = build_query_answer_policy(query, references)
     history_messages = convert_history(history)
     coverage_requirements = build_coverage_requirements(
         query,
@@ -137,9 +135,7 @@ def build_rag_variables(
     context = build_context(
         query,
         references,
-        is_multi_doc_comparative=is_multi_doc_comparative,
-        should_direct_answer=should_direct_answer,
-        requirement_count=requirement_count,
+        policy=policy,
     )
     memory_section = ""
     trimmed_memory = agent_memory_context.strip()
@@ -351,6 +347,7 @@ def append_answer_trace(
     prompt_kind: str,
     answer: str,
 ) -> None:
+    policy = build_query_answer_policy(query, references)
     reference_overview = build_reference_overview(references)
     source_modalities = count_reference_attribute(references, "source_modality")
     evidence_types = count_reference_attribute(references, "evidence_type")
@@ -382,10 +379,10 @@ def append_answer_trace(
             "has_text_ts_joint_coverage": reference_overview.has_text_ts_joint_coverage,
             "has_text_ts_joint_evidence": has_text_context and has_timeseries_context,
             "has_multimodal_context": len([key for key, value in context_groups.items() if value > 0]) >= 2,
-            "direct_answer_query": should_directly_answer_query(query),
+            "direct_answer_query": policy.should_direct_answer,
             "temporal_answer_query": is_temporal_answer_query(query),
             "temporal_constraint_detected": is_temporal_answer_query(query),
-            "coverage_requirement_count": len(split_query_into_requirements(query)),
+            "coverage_requirement_count": policy.requirement_count,
             "answer_preview": answer[:240],
         },
     )
