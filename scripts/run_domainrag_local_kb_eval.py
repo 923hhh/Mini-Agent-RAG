@@ -10,6 +10,7 @@ metrics.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import re
@@ -41,6 +42,19 @@ TASK_NAME_MAP = {
 }
 DOC_PSG_PATTERN = re.compile(r"__doc-(?P<doc_id>\d+)__psg-(?P<psg_id>\d+)\.txt$", re.IGNORECASE)
 DOC_ONLY_PATTERN = re.compile(r"__doc-(?P<doc_id>\d+)", re.IGNORECASE)
+
+
+def log_status(message: str) -> None:
+    print(f"[domainrag-local-eval] {message}", flush=True)
+
+
+def render_progress(completed: int, total: int, *, width: int = 24) -> str:
+    total = max(total, 1)
+    completed = min(max(completed, 0), total)
+    ratio = completed / total
+    filled = min(width, int(ratio * width))
+    bar = "#" * filled + "-" * (width - filled)
+    return f"[{bar}] {completed}/{total} ({ratio * 100:5.1f}%)"
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +96,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.35,
         help="Retriever score threshold.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of worker threads used for parallel evaluation.",
     )
     return parser.parse_args()
 
@@ -133,18 +153,29 @@ def load_eval_samples(domainrag_root: Path, tasks: list[str], max_samples: int) 
                 }
             )
     if max_samples > 0:
-        return merged[:max_samples]
+        if max_samples <= len(tasks) * 5:
+            return merged[:max_samples]
+        per_task_limit = max_samples // len(tasks)
+        balanced: list[dict[str, Any]] = []
+        task_counts: dict[str, int] = {}
+        for item in merged:
+            t = item["task"]
+            task_counts.setdefault(t, 0)
+            if task_counts[t] < per_task_limit:
+                balanced.append(item)
+                task_counts[t] += 1
+        return balanced
     return merged
 
 
 def extract_positive_references(sample: dict[str, Any]) -> list[dict[str, Any]]:
     raw = sample["raw"]
-    positives = raw.get("positive_reference")
-    if isinstance(positives, list) and positives:
-        return [item for item in positives if isinstance(item, dict)]
-    positives = raw.get("positive_references")
-    if isinstance(positives, list) and positives:
-        return [item for item in positives if isinstance(item, dict)]
+    for field_name in ("positive_reference", "positive_references"):
+        positives = raw.get(field_name)
+        if isinstance(positives, dict):
+            return [positives]
+        if isinstance(positives, list) and positives:
+            return [item for item in positives if isinstance(item, dict)]
     return []
 
 
@@ -349,55 +380,95 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def evaluate_sample(
+    settings,
+    knowledge_base_name: str,
+    top_k: int,
+    score_threshold: float,
+    sample: dict[str, Any],
+) -> dict[str, Any]:
+    references = search_local_knowledge_base(
+        settings=settings,
+        knowledge_base_name=knowledge_base_name,
+        query=sample["query"],
+        top_k=top_k,
+        score_threshold=score_threshold,
+        history=None,
+    )
+    positives = extract_positive_references(sample)
+    retrieval_eval = evaluate_retrieval(references, positives)
+    first_rank = compute_first_match_rank(references, positives, 5) if positives else None
+    match_ranks = compute_match_ranks(references, positives, 5) if positives else []
+    ranking_metrics = {
+        "Recall@5": 0.0 if first_rank is None else 1.0,
+        "MRR": 0.0 if first_rank is None else round(1.0 / first_rank, 6),
+        "NDCG@5": round(compute_ndcg_at_k(match_ranks, max(len(positives), 1), 5), 6) if positives else 0.0,
+        "first_match_rank_at_5": first_rank,
+        "matched_ranks_at_5": match_ranks,
+    }
+    return {
+        "task": sample["task"],
+        "task_key": sample["task_key"],
+        "sample_index": sample["sample_index"],
+        "question": sample["question"],
+        "query": sample["query"],
+        "positive_reference_count": len(positives),
+        "positive_references": positives,
+        "retrieved_references": [serialize_reference(item) for item in references[:10]],
+        "retrieval_eval": retrieval_eval,
+        "ranking_metrics": ranking_metrics,
+    }
+
+
 def main() -> int:
     args = parse_args()
+    log_status("starting evaluation")
     domainrag_root = args.domainrag_root.resolve()
+    log_status(f"domainrag_root={domainrag_root}")
+    log_status("loading settings")
     settings = load_settings(PROJECT_ROOT)
+    log_status("loading evaluation samples")
     samples = load_eval_samples(domainrag_root, args.tasks, args.max_samples)
     if not samples:
         raise RuntimeError("No evaluation samples loaded.")
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1.")
+    log_status(
+        f"loaded {len(samples)} samples across tasks={','.join(args.tasks)}; "
+        f"workers={args.workers}; kb={args.knowledge_base_name}"
+    )
+    log_status("submitting retrieval jobs")
 
-    results: list[dict[str, Any]] = []
-    for index, sample in enumerate(samples, start=1):
-        print(
-            f"[domainrag-local-eval] {index}/{len(samples)} "
-            f"{sample['task']} sample={sample['sample_index']}",
-            flush=True,
-        )
-        references = search_local_knowledge_base(
-            settings=settings,
-            knowledge_base_name=args.knowledge_base_name,
-            query=sample["query"],
-            top_k=args.top_k,
-            score_threshold=args.score_threshold,
-            history=None,
-        )
-        positives = extract_positive_references(sample)
-        retrieval_eval = evaluate_retrieval(references, positives)
-        first_rank = compute_first_match_rank(references, positives, 5) if positives else None
-        match_ranks = compute_match_ranks(references, positives, 5) if positives else []
-        ranking_metrics = {
-            "Recall@5": 0.0 if first_rank is None else 1.0,
-            "MRR": 0.0 if first_rank is None else round(1.0 / first_rank, 6),
-            "NDCG@5": round(compute_ndcg_at_k(match_ranks, max(len(positives), 1), 5), 6) if positives else 0.0,
-            "first_match_rank_at_5": first_rank,
-            "matched_ranks_at_5": match_ranks,
+    indexed_results: list[dict[str, Any] | None] = [None] * len(samples)
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        future_to_index = {
+            executor.submit(
+                evaluate_sample,
+                settings,
+                args.knowledge_base_name,
+                args.top_k,
+                args.score_threshold,
+                sample,
+            ): index
+            for index, sample in enumerate(samples)
         }
-        results.append(
-            {
-                "task": sample["task"],
-                "task_key": sample["task_key"],
-                "sample_index": sample["sample_index"],
-                "question": sample["question"],
-                "query": sample["query"],
-                "positive_reference_count": len(positives),
-                "positive_references": positives,
-                "retrieved_references": [serialize_reference(item) for item in references[:10]],
-                "retrieval_eval": retrieval_eval,
-                "ranking_metrics": ranking_metrics,
-            }
-        )
+        completed = 0
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            sample = samples[index]
+            indexed_results[index] = future.result()
+            completed += 1
+            progress = render_progress(completed, len(samples))
+            print(
+                f"\r[domainrag-local-eval] {progress} "
+                f"last={sample['task']}#{sample['sample_index']}",
+                end="" if completed < len(samples) else "\n",
+                flush=True,
+            )
 
+    results = [item for item in indexed_results if item is not None]
+
+    log_status("building summary")
     summary = build_summary(results)
     payload = {
         "knowledge_base_name": args.knowledge_base_name,
@@ -407,9 +478,11 @@ def main() -> int:
         "sample_count": len(results),
         "top_k": args.top_k,
         "score_threshold": args.score_threshold,
+        "workers": args.workers,
         "summary": summary,
         "results": results,
     }
+    log_status(f"writing report to {args.output}")
     write_json_report(args.output, payload)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"[done] output: {args.output}")

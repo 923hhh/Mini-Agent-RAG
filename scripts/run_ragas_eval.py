@@ -26,6 +26,9 @@ from app.services.core.settings import AppSettings, load_settings
 from app.services.models.embedding_service import build_embeddings
 from app.services.models.llm_service import build_chat_model, resolve_openai_compatible_api_key
 
+DEFAULT_OLLAMA_JUDGE_LLM_MODEL = "qwen2.5:7b"
+DEFAULT_OLLAMA_JUDGE_EMBEDDING_MODEL = "bge-m3:latest"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -195,16 +198,7 @@ def main() -> int:
         embedding_provider=args.judge_embedding_provider,
         embedding_model=args.judge_embedding_model.strip(),
     )
-    judge_llm = build_chat_model(
-        judge_settings,
-        model_name=judge_settings.model.QUERY_REWRITE_MODEL.strip()
-        or judge_settings.model.DEFAULT_LLM_MODEL,
-        temperature=0.0,
-    )
-    judge_embeddings = build_embeddings(
-        judge_settings,
-        model_name=judge_settings.model.DEFAULT_EMBEDDING_MODEL,
-    )
+    judge_llm, judge_embeddings = build_runtime_judges(judge_settings)
 
     metrics = [
         LLMContextRecall(name="llm_context_recall"),
@@ -214,15 +208,41 @@ def main() -> int:
     ]
 
     dataset = EvaluationDataset(samples=runtime_samples)
-    result = evaluate(
-        dataset=dataset,
-        metrics=metrics,
-        llm=judge_llm,
-        embeddings=judge_embeddings,
-        batch_size=args.ragas_batch_size,
-        raise_exceptions=False,
-        show_progress=True,
-    )
+    try:
+        result = evaluate(
+            dataset=dataset,
+            metrics=metrics,
+            llm=judge_llm,
+            embeddings=judge_embeddings,
+            batch_size=args.ragas_batch_size,
+            raise_exceptions=False,
+            show_progress=True,
+        )
+    except Exception as exc:
+        if judge_settings.model.LLM_PROVIDER != "openai_compatible" or not is_openai_compatible_404_error(exc):
+            raise
+        print(
+            "[ragas-eval] openai_compatible judge returned 404 during scoring; "
+            "falling back to ollama judge and retrying once",
+            flush=True,
+        )
+        judge_settings = build_ollama_fallback_judge_settings(settings, args, judge_settings)
+        print(
+            "[ragas-eval] fallback judge "
+            f"llm={judge_settings.model.QUERY_REWRITE_MODEL or judge_settings.model.DEFAULT_LLM_MODEL}; "
+            f"embedding={judge_settings.model.DEFAULT_EMBEDDING_MODEL}",
+            flush=True,
+        )
+        judge_llm, judge_embeddings = build_runtime_judges(judge_settings)
+        result = evaluate(
+            dataset=dataset,
+            metrics=metrics,
+            llm=judge_llm,
+            embeddings=judge_embeddings,
+            batch_size=args.ragas_batch_size,
+            raise_exceptions=False,
+            show_progress=True,
+        )
 
     report = build_report(
         dataset_path=dataset_path,
@@ -243,7 +263,33 @@ def main() -> int:
 
 
 def load_testset_cases(dataset_path: Path) -> list[dict[str, Any]]:
-    return load_jsonl(dataset_path, encoding="utf-8")
+    raw_cases = load_jsonl(dataset_path, encoding="utf-8")
+    normalized: list[dict[str, Any]] = []
+    for case in raw_cases:
+        entry = dict(case)
+        if "user_input" not in entry and "question" in entry:
+            entry["user_input"] = entry["question"]
+        if "reference" not in entry:
+            if "answers" in entry and entry["answers"]:
+                answers = entry["answers"]
+                if isinstance(answers, list):
+                    flat_answers: list[str] = []
+                    for item in answers:
+                        if isinstance(item, list):
+                            flat_answers.extend(str(a) for a in item)
+                        else:
+                            flat_answers.append(str(item))
+                    entry["reference"] = "；".join(flat_answers) if flat_answers else ""
+                else:
+                    entry["reference"] = str(answers)
+        if "reference_contexts" not in entry and "positive_reference" in entry:
+            pos_ref = entry["positive_reference"]
+            if isinstance(pos_ref, list):
+                entry["reference_contexts"] = [str(item) for item in pos_ref if item]
+            elif pos_ref:
+                entry["reference_contexts"] = [str(pos_ref)]
+        normalized.append(entry)
+    return normalized
 
 
 def build_retrieved_context_text(reference: RetrievedReference) -> str:
@@ -297,6 +343,65 @@ def resolve_effective_embedding_provider(
     if requested_provider in {"ollama", "openai_compatible"}:
         return requested_provider
     return effective_llm_provider
+
+
+def looks_like_ollama_model_name(model_name: str) -> bool:
+    normalized = model_name.strip()
+    return ":" in normalized if normalized else False
+
+
+def select_ollama_fallback_model(candidate: str, default: str) -> str:
+    normalized = candidate.strip()
+    if looks_like_ollama_model_name(normalized):
+        return normalized
+    return default
+
+
+def is_openai_compatible_404_error(exc: Exception) -> bool:
+    message = str(exc)
+    lowered = message.lower()
+    return "404" in lowered or "notfounderror" in lowered or "not found" in lowered
+
+
+def build_runtime_judges(judge_settings: AppSettings) -> tuple[Any, Any]:
+    judge_llm = build_chat_model(
+        judge_settings,
+        model_name=judge_settings.model.QUERY_REWRITE_MODEL.strip()
+        or judge_settings.model.DEFAULT_LLM_MODEL,
+        temperature=0.0,
+    )
+    judge_embeddings = build_embeddings(
+        judge_settings,
+        model_name=judge_settings.model.DEFAULT_EMBEDDING_MODEL,
+    )
+    return judge_llm, judge_embeddings
+
+
+def build_ollama_fallback_judge_settings(
+    settings: AppSettings,
+    args: argparse.Namespace,
+    current_judge_settings: AppSettings,
+) -> AppSettings:
+    requested_llm_model = args.judge_llm_model.strip()
+    requested_embedding_model = args.judge_embedding_model.strip()
+    fallback_llm_model = select_ollama_fallback_model(
+        requested_llm_model
+        or current_judge_settings.model.QUERY_REWRITE_MODEL
+        or current_judge_settings.model.DEFAULT_LLM_MODEL,
+        DEFAULT_OLLAMA_JUDGE_LLM_MODEL,
+    )
+    fallback_embedding_model = select_ollama_fallback_model(
+        requested_embedding_model
+        or current_judge_settings.model.DEFAULT_EMBEDDING_MODEL,
+        DEFAULT_OLLAMA_JUDGE_EMBEDDING_MODEL,
+    )
+    return build_judge_settings(
+        settings,
+        llm_provider="ollama",
+        llm_model=fallback_llm_model,
+        embedding_provider="ollama",
+        embedding_model=fallback_embedding_model,
+    )
 
 
 def resolve_output_path(output_path: Path | None, dataset_path: Path) -> Path:

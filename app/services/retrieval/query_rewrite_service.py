@@ -72,6 +72,52 @@ class ComparativeEntityProfile:
     is_multi_entity_comparative: bool
     entity_names: tuple[str, ...]
 
+
+@dataclass(frozen=True)
+class ComparativeFocusProfile:
+    rewrite_terms: tuple[str, ...]
+    aspect_terms: tuple[str, ...]
+
+
+COMPARATIVE_EMPLOYMENT_TERMS = (
+    "就业",
+    "就业方向",
+    "就业去向",
+    "就业领域",
+    "就业岗位",
+    "行业",
+    "职业",
+    "毕业去向",
+)
+COMPARATIVE_CURRICULUM_TERMS = (
+    "课程",
+    "课程体系",
+    "核心课程",
+    "主干课程",
+    "培养方案",
+    "课程设置",
+    "学什么",
+)
+COMPARATIVE_TRAINING_TERMS = (
+    "培养",
+    "培养目标",
+    "培养模式",
+    "人才培养",
+    "培养特色",
+)
+COMPARATIVE_ROUNDUP_MARKERS = (
+    "速览",
+    "看点",
+    "热点问答",
+    "问答",
+    "招生专业",
+    "专业目录",
+    "专业有哪",
+    "哪些专业",
+    "一览",
+    "汇总",
+)
+
 QUERY_REWRITE_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
@@ -145,6 +191,30 @@ def rewrite_query_for_retrieval(
     return normalized_query
 
 
+_EXTRACTIVE_QUESTION_WORDS = re.compile(
+    r"(是多少|是什么|有哪些|有几|多少分|多少人|几个|几门|几年|怎么样|如何|哪里|在哪)"
+)
+_EXTRACTIVE_FILLER = re.compile(
+    r"(请问|我想知道|我想了解|能否告诉我|可以告诉我|帮我查一下|你好|你能)"
+)
+_EXTRACTIVE_SIGNAL = re.compile(
+    r"(\d{4}年|录取|分数|分数线|最低分|最高分|平均分|人数|名额|学费|多少|几)"
+)
+
+
+def _build_keyword_variant(query: str) -> str:
+    """Strip question fillers to produce a keyword-dense variant for BM25.
+    Only fires for queries with extractive signals (numbers, scores, years)."""
+    if not _EXTRACTIVE_SIGNAL.search(query):
+        return ""
+    stripped = _EXTRACTIVE_FILLER.sub("", query).strip()
+    stripped = _EXTRACTIVE_QUESTION_WORDS.sub("", stripped).strip()
+    stripped = stripped.rstrip("？?，,。.、的吗呢吧")
+    if len(stripped) < 4 or stripped == query.strip():
+        return ""
+    return stripped
+
+
 def generate_multi_queries(
     settings: AppSettings,
     query: str,
@@ -153,8 +223,13 @@ def generate_multi_queries(
     normalized_query = query.strip()
     if not normalized_query:
         return []
-    if build_comparative_entity_profile(normalized_query).is_multi_entity_comparative:
-        return [normalized_query]
+    comparative_profile = build_comparative_entity_profile(normalized_query)
+    if comparative_profile.is_multi_entity_comparative:
+        return build_comparative_query_candidates(
+            normalized_query,
+            profile=comparative_profile,
+            limit=settings.kb.MULTI_QUERY_MAX_QUERIES,
+        )
     if not settings.kb.ENABLE_QUERY_REWRITE or _should_skip_rewrite(normalized_query):
         return [normalized_query]
 
@@ -170,11 +245,15 @@ def generate_multi_queries(
             max_queries=max_queries,
         )
         if generated_queries:
-            return deduplicate_query_candidates(
+            result = deduplicate_query_candidates(
                 normalized_query,
                 generated_queries,
                 limit=max_queries,
             )
+            keyword_variant = _build_keyword_variant(normalized_query)
+            if keyword_variant and keyword_variant not in result:
+                result.append(keyword_variant)
+            return result[:max_queries + 1]
 
     rewritten = _invoke_single_query_rewrite(settings, normalized_query, history)
     if not rewritten:
@@ -329,6 +408,52 @@ def parse_multi_query_output(
     return deduplicate_query_candidates(original_query, candidates, limit=limit + 1)[1:]
 
 
+def build_comparative_query_candidates(
+    original_query: str,
+    *,
+    profile: ComparativeEntityProfile,
+    limit: int,
+) -> list[str]:
+    normalized_query = original_query.strip()
+    if not normalized_query:
+        return []
+
+    focus_profile = build_comparative_focus_profile(normalized_query)
+    candidates = [normalized_query]
+    max_candidates = max(1, limit)
+    entity_pair = "与".join(profile.entity_names)
+    rewrite_terms = [term for term in focus_profile.rewrite_terms if term]
+    aspect_terms = [term for term in focus_profile.aspect_terms if term]
+    same_aspect_terms = [term for term in aspect_terms if term in ("共同", "共同点", "相似", "相似之处")]
+    diff_aspect_terms = [
+        term for term in aspect_terms
+        if term in ("区别", "不同", "差异", "异同", "特点", "特征", "独特")
+    ]
+
+    comparative_variants: list[str] = []
+    if rewrite_terms:
+        comparative_variants.append(f"{entity_pair} {' '.join(rewrite_terms[:2])}".strip())
+    if same_aspect_terms:
+        comparative_variants.append(f"{entity_pair} {' '.join(same_aspect_terms[:2])}".strip())
+    if diff_aspect_terms:
+        comparative_variants.append(f"{entity_pair} {' '.join(diff_aspect_terms[:2])}".strip())
+    if rewrite_terms and diff_aspect_terms:
+        comparative_variants.append(
+            f"{entity_pair} {rewrite_terms[0]} {diff_aspect_terms[0]}".strip()
+        )
+    if rewrite_terms and same_aspect_terms:
+        comparative_variants.append(
+            f"{entity_pair} {rewrite_terms[0]} {same_aspect_terms[0]}".strip()
+        )
+
+    for candidate in comparative_variants:
+        candidates.append(candidate)
+        if len(candidates) >= max_candidates:
+            break
+
+    return deduplicate_strings(candidates)[:max_candidates]
+
+
 def split_candidate_line(text: str) -> list[str]:
     normalized = text.replace("；", "\n").replace(";", "\n")
     return [item.strip() for item in normalized.splitlines() if item.strip()]
@@ -462,10 +587,54 @@ def build_comparative_entity_profile(query: str) -> ComparativeEntityProfile:
     return ComparativeEntityProfile(True, entity_names)
 
 
+def build_comparative_focus_profile(query: str) -> ComparativeFocusProfile:
+    normalized_query = query.strip()
+    if not normalized_query:
+        return ComparativeFocusProfile((), ())
+
+    rewrite_terms: list[str] = []
+    aspect_terms: list[str] = []
+
+    if any(term in normalized_query for term in COMPARATIVE_EMPLOYMENT_TERMS):
+        rewrite_terms.extend(("就业方向", "就业去向", "行业岗位"))
+        aspect_terms.extend(("就业", "就业方向", "就业去向", "行业", "岗位", "职业"))
+    elif any(term in normalized_query for term in COMPARATIVE_CURRICULUM_TERMS):
+        rewrite_terms.extend(("课程体系", "核心课程", "培养方案"))
+        aspect_terms.extend(("课程", "课程体系", "核心课程", "主干课程", "培养方案", "学什么"))
+    elif any(term in normalized_query for term in COMPARATIVE_TRAINING_TERMS):
+        rewrite_terms.extend(("培养模式", "人才培养目标", "培养特色"))
+        aspect_terms.extend(("培养", "培养模式", "人才培养目标", "培养目标", "培养特色"))
+
+    if any(marker in normalized_query for marker in ("共同", "相同", "相似", "共同点", "相似之处", "共同目标")):
+        rewrite_terms.extend(("共同点", "相似之处"))
+        aspect_terms.extend(("共同", "共同点", "相似", "相似之处"))
+    if any(marker in normalized_query for marker in ("区别", "不同", "差异", "异同", "特点", "特征", "独特")):
+        rewrite_terms.extend(("不同点", "区别"))
+        aspect_terms.extend(("区别", "不同", "差异", "异同", "特点", "特征", "独特"))
+
+    if not rewrite_terms:
+        rewrite_terms.extend(("共同点", "不同点"))
+    if not aspect_terms:
+        aspect_terms.extend(("共同点", "不同点", "特点"))
+
+    return ComparativeFocusProfile(
+        rewrite_terms=tuple(dict.fromkeys(term.strip() for term in rewrite_terms if term.strip())),
+        aspect_terms=tuple(dict.fromkeys(term.strip() for term in aspect_terms if term.strip())),
+    )
+
+
 def extract_comparative_professional_entities(query: str) -> tuple[str, ...]:
     stripped = query.strip()
     if not stripped or "专业" not in stripped:
         return ()
+
+    explicit_entities = [
+        re.sub(r"^(?:与|和|及|以及|、)+", "", item.strip(" ，,。；;？?"))
+        for item in re.findall(r"[\u4e00-\u9fffA-Za-z0-9与和及以及、]+?专业", stripped)
+    ]
+    explicit_entities = [item for item in explicit_entities if item]
+    if len(deduplicate_strings(explicit_entities)) >= 2:
+        return tuple(deduplicate_strings(explicit_entities)[:2])
 
     prefix = stripped.split("专业", 1)[0]
     relation_match = re.search(r"(与|和|及|以及)", prefix)
@@ -478,6 +647,63 @@ def extract_comparative_professional_entities(query: str) -> tuple[str, ...]:
 
     entities = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+?专业", stripped)
     return tuple(deduplicate_strings(entities)[:2])
+
+
+def comparative_entity_matches_text(
+    entity_name: str,
+    *,
+    title: str = "",
+    section_title: str = "",
+    source: str = "",
+    search_text: str = "",
+) -> bool:
+    normalized_entity = entity_name.strip().lower()
+    if not normalized_entity:
+        return False
+
+    relaxed_entity = normalized_entity.removesuffix("专业").strip()
+    normalized_title = str(title or "").strip().lower()
+    normalized_section_title = str(section_title or "").strip().lower()
+    normalized_source = str(source or "").strip().lower()
+    source_stem = normalized_source.split("__", 1)[0].strip()
+    metadata_fields = (
+        normalized_title,
+        normalized_section_title,
+        normalized_source,
+        source_stem,
+    )
+    exact_candidates = tuple(item for item in (normalized_entity, relaxed_entity) if item)
+
+    if any(field and field in exact_candidates for field in metadata_fields):
+        return True
+
+    metadata_combined = "\n".join(item for item in metadata_fields if item)
+    if any(marker in metadata_combined for marker in COMPARATIVE_ROUNDUP_MARKERS):
+        return False
+
+    if any(
+        field and (
+            normalized_entity in field
+            or (relaxed_entity and relaxed_entity in field)
+        )
+        for field in metadata_fields
+    ):
+        return True
+
+    normalized_search_text = str(search_text or "").strip().lower()
+    if not normalized_search_text:
+        return False
+
+    explicit_professional_phrase = (
+        normalized_entity in normalized_search_text
+        or (relaxed_entity and f"{relaxed_entity}专业" in normalized_search_text)
+        or (relaxed_entity and f"{relaxed_entity} 专业" in normalized_search_text)
+    )
+    if not explicit_professional_phrase:
+        return False
+
+    # Body-only mentions are too noisy for comparative coverage; prefer title/source anchored matches.
+    return False
 
 
 def deduplicate_inline_terms(text: str) -> str:

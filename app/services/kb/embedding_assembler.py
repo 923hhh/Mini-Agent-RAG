@@ -125,7 +125,10 @@ class EmbeddingAssembler:
         )
 
     def embed_chunks(self, chunks: list[Document]) -> list[VectorStoreEntry]:
-        texts = [chunk.page_content for chunk in chunks]
+        if self.settings.kb.ENABLE_TITLE_WEIGHTED_EMBEDDING:
+            texts = [build_embedding_text(chunk) for chunk in chunks]
+        else:
+            texts = [chunk.page_content for chunk in chunks]
         vectors = embed_texts_batched(
             self.embeddings,
             texts,
@@ -160,6 +163,21 @@ class EmbeddingAssembler:
             adapter.append(entries)
             return
         adapter.build(entries)
+
+
+def build_embedding_text(chunk: Document) -> str:
+    title = str(chunk.metadata.get("title", "")).strip()
+    section_title = str(chunk.metadata.get("section_title", "")).strip()
+    content = chunk.page_content.strip()
+    prefix_parts: list[str] = []
+    if title:
+        prefix_parts.append(title)
+    if section_title and section_title != title:
+        prefix_parts.append(section_title)
+    if not prefix_parts:
+        return content
+    prefix = " ".join(prefix_parts)
+    return f"{prefix}\n{content}"
 
 
 def attach_chunk_metadata(chunks: list[Document]) -> list[DocumentChunkRecord]:

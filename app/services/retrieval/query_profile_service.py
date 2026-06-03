@@ -37,6 +37,15 @@ MULTI_DOC_QUERY_HINTS = (
     "哪些专业",
     "哪个专业",
     "哪几个专业",
+    "总结",
+    "汇总",
+    "综合",
+    "所有",
+    "各个",
+    "各部门",
+    "各学院",
+    "多个",
+    "几个",
 )
 MULTI_DOC_CONNECTORS = (
     "与",
@@ -71,6 +80,28 @@ TEMPORAL_RECENCY_HINTS = (
     "今年",
     "本年",
     "本年度",
+)
+CURRENT_ROLE_QUERY_HINTS = (
+    "谁",
+    "哪位",
+    "何人",
+    "是谁",
+    "由谁",
+    "担任",
+)
+HISTORICAL_ROLE_QUERY_HINTS = (
+    "历任",
+    "曾任",
+    "前任",
+    "上一任",
+    "原任",
+)
+CURRENT_ROLE_TERMS = (
+    "校长",
+    "书记",
+    "院长",
+    "主任",
+    "负责人",
 )
 YEAR_PATTERN = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 DATE_PATTERN = re.compile(
@@ -140,6 +171,8 @@ class TemporalQueryProfile:
     prefers_recent: bool
     explicit_years: tuple[int, ...]
     explicit_dates: tuple[int, ...]
+    is_current_role_query: bool
+    asked_role_terms: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -243,7 +276,7 @@ def infer_diversity_query_profile(query_bundle: list[str]) -> DiversityQueryProf
     combined = " ".join(item.strip().lower() for item in query_bundle if item.strip())
     connector_hits = sum(combined.count(connector) for connector in MULTI_DOC_CONNECTORS)
     hint_hits = sum(1 for hint in MULTI_DOC_QUERY_HINTS if hint in combined)
-    return DiversityQueryProfile(prefer_family_diversity=hint_hits > 0 and connector_hits > 0)
+    return DiversityQueryProfile(prefer_family_diversity=hint_hits > 0 or connector_hits >= 2)
 
 
 def resolve_rerank_model_selection(
@@ -274,15 +307,37 @@ def infer_temporal_query_profile(query_bundle: list[str]) -> TemporalQueryProfil
     explicit_dates = tuple(sorted(set(extract_date_ordinals_from_text(combined))))
     has_month_day_reference = bool(MONTH_DAY_PATTERN.search(combined))
     prefers_recent = any(term in combined for term in TEMPORAL_RECENCY_HINTS)
-    is_temporal = prefers_recent or bool(explicit_years) or bool(explicit_dates) or has_month_day_reference or any(
+    asked_role_terms = extract_current_role_terms_from_query(combined)
+    has_role_answer_intent = bool(asked_role_terms) and any(term in combined for term in CURRENT_ROLE_QUERY_HINTS)
+    has_historical_role_intent = any(term in combined for term in HISTORICAL_ROLE_QUERY_HINTS)
+    is_current_role_query = bool(asked_role_terms) and not has_historical_role_intent and (
+        prefers_recent or has_role_answer_intent
+    )
+    is_temporal = (
+        prefers_recent
+        or is_current_role_query
+        or bool(explicit_years)
+        or bool(explicit_dates)
+        or has_month_day_reference
+        or any(
         term in combined for term in TEMPORAL_QUERY_HINTS
+        )
     )
     return TemporalQueryProfile(
         is_temporal=is_temporal,
         prefers_recent=prefers_recent,
         explicit_years=explicit_years,
         explicit_dates=explicit_dates,
+        is_current_role_query=is_current_role_query,
+        asked_role_terms=asked_role_terms,
     )
+
+
+def extract_current_role_terms_from_query(query_text: str) -> tuple[str, ...]:
+    combined = str(query_text or "").strip().lower()
+    if not combined:
+        return ()
+    return tuple(term for term in CURRENT_ROLE_TERMS if term in combined)
 
 
 def infer_joint_query_profile(query_bundle: list[str], timeseries_query_profile) -> JointQueryProfile:

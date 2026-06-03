@@ -117,6 +117,20 @@ def build_caches_for_plans(
             suffix=f"{plan.snapshot.relative_path} | 累计 chunks={total_split_chunks}",
         )
     text_split_seconds = round(perf_counter() - started_at, 4)
+    if settings.kb.ENABLE_CHUNK_QUESTION_GENERATION:
+        from app.services.kb.chunk_question_service import generate_chunk_questions
+
+        started_at = perf_counter()
+        emit_progress(
+            progress_callback,
+            0.54,
+            f"[rebuild] 为 {total_split_chunks} 个切片生成检索问题",
+        )
+        for relative_path, chunks in chunk_batches.items():
+            generate_chunk_questions(settings, chunks)
+        question_gen_seconds = round(perf_counter() - started_at, 4)
+    else:
+        question_gen_seconds = 0.0
     started_at = perf_counter()
     total_embedded_chunks = 0
     for index, plan in enumerate(plans, start=1):
@@ -180,6 +194,7 @@ def build_caches_for_plans(
         stage_timings={
             "document_load": document_load_seconds,
             "text_split": text_split_seconds,
+            "question_generation": question_gen_seconds,
             "embedding": embedding_seconds,
         },
     )

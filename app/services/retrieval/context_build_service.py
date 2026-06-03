@@ -24,7 +24,7 @@ def build_context(
     prompt_references = deduplicate_references_for_prompt(
         references,
         prefer_content_detail=policy.is_multi_doc_comparative,
-        max_items=resolve_prompt_reference_limit(query, references),
+        max_items=resolve_prompt_reference_limit(query, references, policy=policy),
     )
 
     grouped_blocks = {
@@ -89,10 +89,15 @@ def deduplicate_references_for_prompt(
 def resolve_prompt_reference_limit(
     query: str,
     references: list[RetrievedReference],
+    *,
+    policy: QueryAnswerPolicy | None = None,
 ) -> int:
     normalized = str(query or "").strip().lower()
     if not normalized:
         return 5 if len(references) >= 5 else 3
+
+    if policy is not None and policy.is_multi_doc_comparative:
+        return 6 if len(references) >= 6 else 5
 
     multi_part_markers = (
         "分别",

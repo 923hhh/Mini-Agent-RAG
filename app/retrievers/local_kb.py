@@ -14,10 +14,12 @@ from app.services.retrieval.candidate_retrieval_service import (
     filter_documents_by_metadata,
     load_all_documents,
 )
+from app.services.retrieval.candidate_common_service import get_chunk_id
 from app.services.retrieval.candidate_rerank_service import diversify_candidates, rerank_candidates
 from app.services.retrieval.query_profile_service import (
     infer_diversity_query_profile,
     infer_query_modality_profile,
+    infer_temporal_query_profile,
 )
 from app.services.retrieval.query_rewrite_service import generate_hypothetical_doc, generate_multi_queries
 from app.services.retrieval.reference_assembly_service import (
@@ -33,6 +35,7 @@ from app.services.retrieval.timeseries_extension_service import (
     build_timeseries_extension_plan,
     retrieve_candidates_with_timeseries_extension,
 )
+from app.services.retrieval.candidate_fusion_service import apply_temporal_prefilter
 from app.services.runtime.temp_kb_service import ensure_temp_knowledge_available
 from app.storage.bm25_index import LoadedBM25Index, load_bm25_index, resolve_bm25_index_path
 from app.storage.filters import MetadataFilters
@@ -225,6 +228,9 @@ def search_vector_store(
         )
         return []
 
+    temporal_profile = infer_temporal_query_profile(query_bundle)
+    candidates = apply_temporal_prefilter(candidates, temporal_profile)
+
     reranked = rerank_candidates(
         settings=settings,
         query=query,
@@ -236,6 +242,49 @@ def search_vector_store(
         diagnostics=retrieval_diagnostics,
     )
     filtered = [item for item in reranked if item.relevance_score >= score_threshold]
+    if not filtered and reranked:
+        relaxed_threshold = max(0.0, score_threshold - 0.25)
+        filtered = [item for item in reranked if item.relevance_score >= relaxed_threshold]
+
+    need_second_pass = (
+        len(filtered) < top_k
+        or (filtered and filtered[0].rerank_score < 0.4)
+    )
+    if need_second_pass and len(query_bundle) > 1:
+        second_query = query_bundle[1]
+        second_dense_bundle = build_dense_query_bundle([second_query], "")
+        second_candidates = retrieve_candidates_with_timeseries_extension(
+            settings=settings,
+            vector_store=vector_store,
+            sentence_vector_store=sentence_vector_store,
+            all_documents=filtered_documents,
+            query_bundle=[second_query],
+            dense_query_bundle=second_dense_bundle,
+            bm25_index=bm25_index,
+            top_k=top_k + 3,
+            metadata_filters=metadata_filters,
+            query_profile=query_profile,
+            extension_plan=timeseries_extension_plan,
+            diagnostics=None,
+        )
+        if second_candidates:
+            second_reranked = rerank_candidates(
+                settings=settings,
+                query=second_query,
+                candidates=second_candidates,
+                query_bundle=[second_query],
+                query_profile=query_profile,
+                joint_query_profile=timeseries_extension_plan.joint_query_profile,
+                top_k=top_k + 3,
+            )
+            existing_ids = {get_chunk_id(item.document) for item in filtered}
+            relaxed_th = max(0.0, score_threshold - 0.15)
+            for item in second_reranked:
+                if get_chunk_id(item.document) not in existing_ids and item.relevance_score >= relaxed_th:
+                    filtered.append(item)
+                    existing_ids.add(get_chunk_id(item.document))
+            filtered.sort(key=lambda item: item.rerank_score, reverse=True)
+
     if not filtered:
         append_retrieval_trace(
             settings=settings,
@@ -257,6 +306,7 @@ def search_vector_store(
         query_profile=query_profile,
         joint_query_profile=timeseries_extension_plan.joint_query_profile,
         diversity_profile=infer_diversity_query_profile(query_bundle),
+        query_bundle=query_bundle,
     )
     enrich_topk_diagnostics(
         diagnostics=retrieval_diagnostics,

@@ -27,6 +27,18 @@ NON_ALNUM_PATTERN = re.compile(r"[^0-9a-z\u4e00-\u9fff]+", re.IGNORECASE)
 BM25_INDEX_FILENAME = "bm25_index.json"
 EMPTY_BM25_TOKEN = "__bm25_empty__"
 
+CHINESE_STOP_BIGRAMS: frozenset[str] = frozenset(
+    [
+        "\u4ec0\u4e48", "\u600e\u4e48", "\u600e\u6837", "\u5982\u4f55", "\u54ea\u4e9b", "\u54ea\u4e2a", "\u54ea\u91cc", "\u54ea\u4f4d",
+        "\u4e3a\u4ec0", "\u662f\u4ec0", "\u7684\u662f", "\u662f\u600e", "\u662f\u54ea", "\u6709\u54ea", "\u4e86\u54ea", "\u4e86\u4ec0",
+        "\u5417\uff1f", "\u5462\uff1f", "\u4e48\uff1f", "\u8bf7\u95ee", "\u80fd\u5426", "\u662f\u5426", "\u53ef\u4ee5", "\u53ef\u5426",
+        "\u5173\u4e8e", "\u5bf9\u4e8e", "\u6709\u5173",
+    ]
+)
+CHINESE_STOP_UNIGRAMS: frozenset[str] = frozenset(
+    ["\u7684", "\u4e86", "\u5417", "\u5462", "\u5427", "\u554a", "\u5440", "\u4e48", "\u662f", "\u6709", "\u5728", "\u548c", "\u4e0e", "\u6216"]
+)
+
 
 class PersistedBM25Document(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -74,9 +86,13 @@ def build_search_text_from_parts(
     section_path = str(metadata.get("section_path", "")).strip()
     source = str(metadata.get("source", "")).strip()
     header_text = " ".join((headers or {}).values()).strip()
+    generated_questions = metadata.get("generated_questions")
+    questions_text = ""
+    if isinstance(generated_questions, list) and generated_questions:
+        questions_text = " ".join(str(q).strip() for q in generated_questions if str(q).strip())
     content = page_content.strip()
     parts: list[str] = []
-    for item in (title, section_title, section_path, header_text, source, content):
+    for item in (title, section_title, section_path, header_text, source, questions_text, content):
         if not item or item in parts:
             continue
         parts.append(item)
@@ -110,6 +126,34 @@ def build_match_terms(texts: list[str], deduplicate: bool = True) -> list[str]:
 
 def normalize_search_text(text: str) -> str:
     return NON_ALNUM_PATTERN.sub("", text.lower())
+
+
+def strip_query_stop_terms(terms: list[str]) -> list[str]:
+    if not terms:
+        return terms
+    filtered = [
+        term for term in terms
+        if term not in CHINESE_STOP_BIGRAMS and term not in CHINESE_STOP_UNIGRAMS
+    ]
+    return filtered if filtered else terms
+
+
+def compute_bigram_proximity_bonus(
+    query_terms: list[str],
+    doc_terms_list: list[str],
+) -> float:
+    if len(query_terms) < 2 or not doc_terms_list:
+        return 0.0
+    doc_bigrams: set[str] = set()
+    for i in range(len(doc_terms_list) - 1):
+        doc_bigrams.add(f"{doc_terms_list[i]}|{doc_terms_list[i + 1]}")
+    query_bigrams: list[str] = []
+    for i in range(len(query_terms) - 1):
+        query_bigrams.append(f"{query_terms[i]}|{query_terms[i + 1]}")
+    if not query_bigrams:
+        return 0.0
+    hits = sum(1 for bigram in query_bigrams if bigram in doc_bigrams)
+    return min(1.5, 0.6 * hits)
 
 
 def build_persisted_bm25_document(
@@ -200,10 +244,12 @@ def score_bm25_index(
     if not query_terms or not index.chunk_ids:
         return []
 
+    effective_terms = strip_query_stop_terms(query_terms)
+
     if index.bm25 is not None:
-        base_scores = [float(item) for item in index.bm25.get_scores(query_terms)]
+        base_scores = [float(item) for item in index.bm25.get_scores(effective_terms)]
     else:
-        base_scores = _compute_legacy_bm25_scores(index=index, query_terms=query_terms)
+        base_scores = _compute_legacy_bm25_scores(index=index, query_terms=effective_terms)
 
     lexical_scores: list[tuple[str, float]] = []
     for idx, chunk_id in enumerate(index.chunk_ids):
@@ -216,6 +262,9 @@ def score_bm25_index(
             score += 0.8
         if any(normalized_query and normalized_query in normalized_text for normalized_query in normalized_queries):
             score += 1.2
+        score += compute_bigram_proximity_bonus(
+            effective_terms, index.tokenized_corpus[idx]
+        )
         if score <= 0:
             continue
         lexical_scores.append((chunk_id, score))

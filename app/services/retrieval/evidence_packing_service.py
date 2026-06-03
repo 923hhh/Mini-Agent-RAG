@@ -41,7 +41,7 @@ def resolve_reference_content_limit(
     if policy.is_numeric_fact:
         return 220
     if policy.is_multi_doc_comparative:
-        return 260
+        return 320
     if policy.should_direct_answer:
         return 120
     if policy.requirement_count > 1:
@@ -66,7 +66,7 @@ def format_reference_block(
         metadata_parts.append(f"type={ref.content_type}")
     metadata_parts.append(f"relevance={ref.relevance_score:.3f}")
 
-    evidence_lines: list[str] = [f"[{index}] " + " | ".join(metadata_parts)]
+    evidence_lines: list[str] = [f"[证据{index}] " + " | ".join(metadata_parts)]
     if ref.evidence_summary:
         evidence_lines.append(f"evidence_summary: {ref.evidence_summary}")
     if (ref.source_modality or "").strip().lower() == "timeseries":

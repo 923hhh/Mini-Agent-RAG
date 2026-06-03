@@ -85,18 +85,46 @@ def build_expanded_content(
     if not available:
         return document.page_content
 
+    expand_chunks = settings.kb.SMALL_TO_BIG_EXPAND_CHUNKS
+    max_chars = settings.kb.SMALL_TO_BIG_MAX_CHARS
+    section_aware = settings.kb.SMALL_TO_BIG_SECTION_AWARE
+
+    current_section = str(document.metadata.get("section_path") or "").strip()
+
+    indices_to_include: list[int] = [chunk_index]
+    if section_aware and current_section:
+        for offset in range(1, expand_chunks + 3):
+            for direction in (-1, 1):
+                idx = chunk_index + direction * offset
+                neighbor = available.get(idx)
+                if neighbor is None:
+                    continue
+                neighbor_section = str(neighbor.metadata.get("section_path") or "").strip()
+                if neighbor_section == current_section:
+                    indices_to_include.append(idx)
+    if len(indices_to_include) <= 1:
+        for offset in range(1, expand_chunks + 1):
+            for idx in (chunk_index - offset, chunk_index + offset):
+                if idx in available:
+                    indices_to_include.append(idx)
+
+    indices_to_include = sorted(set(indices_to_include))
+
     pieces: list[str] = []
     seen_texts: set[str] = set()
-    expand_chunks = settings.kb.SMALL_TO_BIG_EXPAND_CHUNKS
-    for index in range(chunk_index - expand_chunks, chunk_index + expand_chunks + 1):
+    total_chars = 0
+    for index in indices_to_include:
         item = available.get(index)
         if item is None:
             continue
         text = item.page_content.strip()
         if not text or text in seen_texts:
             continue
+        if total_chars + len(text) > max_chars and pieces:
+            break
         pieces.append(text)
         seen_texts.add(text)
+        total_chars += len(text)
 
     return "\n".join(pieces) if pieces else document.page_content
 

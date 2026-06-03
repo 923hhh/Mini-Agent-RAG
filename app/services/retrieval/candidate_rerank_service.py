@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 import re
 
+import numpy as np
 from langchain_core.documents import Document
 
 from app.services.core.settings import AppSettings
@@ -19,10 +20,16 @@ from app.services.retrieval.candidate_fusion_service import (
     build_temporal_candidate_adjustments,
     modality_bonus_for_candidate,
 )
+from app.services.retrieval.query_rewrite_service import (
+    build_comparative_entity_profile,
+    build_comparative_focus_profile,
+    comparative_entity_matches_text,
+)
 from app.services.retrieval.query_profile_service import (
     DiversityQueryProfile,
     JointQueryProfile,
     QueryModalityProfile,
+    TemporalQueryProfile,
     extract_date_ordinals_from_text,
     extract_years_from_text,
     infer_query_modality_profile,
@@ -32,6 +39,7 @@ from app.services.retrieval.query_profile_service import (
     resolve_rerank_model_selection,
     should_focus_answer_window,
 )
+from app.services.models.embedding_service import build_embeddings, embed_texts_batched
 from app.services.retrieval.rerank_service import RerankTextInput, rerank_texts
 from app.utils.text import extract_document_headers
 
@@ -101,6 +109,147 @@ class SampleGroupStats:
     aggregate_score: float
     max_score: float
     candidate_count: int
+
+
+@dataclass(frozen=True)
+class ComparativeQueryProfile:
+    is_multi_entity_comparative: bool
+    entity_names: tuple[str, ...]
+    aspect_terms: tuple[str, ...]
+
+
+_SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？.!?])\s*|(?<=\n)")
+
+SENTENCE_REFINEMENT_TOP_N = 5
+SENTENCE_REFINEMENT_MAX_BOOST = 0.12
+
+KEYWORD_ALIGNMENT_TOP_N = 12
+KEYWORD_ALIGNMENT_MAX_BOOST = 0.12
+KEYWORD_YEAR_TITLE_BONUS = 0.05
+KEYWORD_YEAR_MISSING_PENALTY = 0.10
+
+_YEAR_PATTERN = re.compile(r"((?:19|20)\d{2})")
+_NUMBER_UNIT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*([分点名人元万亿%％])")
+_CHINESE_ENTITY_PATTERN = re.compile(r"[一-鿿]{3,}")
+
+_STOPWORDS = frozenset(
+    "的了是在有和与及或者等不也都而但如果那这就"
+    "什么怎么哪些多少为什么怎样如何可以能够应该"
+    "请问一下关于对于通过进行"
+)
+
+
+def _extract_key_entities(query: str) -> list[str]:
+    entities: list[str] = []
+    for m in _YEAR_PATTERN.finditer(query):
+        entities.append(m.group(1))
+    for m in _NUMBER_UNIT_PATTERN.finditer(query):
+        entities.append(m.group(0))
+    for m in _CHINESE_ENTITY_PATTERN.finditer(query):
+        word = m.group(0)
+        if not all(ch in _STOPWORDS for ch in word) and len(word) >= 3:
+            entities.append(word)
+    return list(dict.fromkeys(entities))
+
+
+_YEAR_CRITICAL_CONTEXT = re.compile(
+    r"((?:19|20)\d{2})\s*年?\s*(录取|分数|招生|报名|投档|最低|最高|计划|人数|名额|学费)"
+)
+
+
+def apply_keyword_entity_alignment_boost(
+    query: str,
+    candidates: list[RetrievalCandidate],
+    top_n: int = KEYWORD_ALIGNMENT_TOP_N,
+) -> list[RetrievalCandidate]:
+    entities = _extract_key_entities(query)
+    if not entities:
+        return candidates
+
+    years = [e for e in entities if _YEAR_PATTERN.fullmatch(e)]
+    top_candidates = candidates[:top_n]
+    rest_candidates = candidates[top_n:]
+
+    has_strong_signal = bool(years) or any(
+        _NUMBER_UNIT_PATTERN.fullmatch(e) for e in entities
+    )
+    scale = 1.0 if has_strong_signal else 0.5
+
+    year_is_critical = bool(_YEAR_CRITICAL_CONTEXT.search(query))
+
+    for candidate in top_candidates:
+        page_text = str(candidate.document.page_content or "")
+        title = str(candidate.document.metadata.get("title", "") or "")
+        source = str(candidate.document.metadata.get("source", "") or "")
+        full_text = f"{title} {source} {page_text}"
+
+        matched = sum(1 for e in entities if e in page_text)
+        entity_hit_ratio = matched / len(entities)
+        boost = KEYWORD_ALIGNMENT_MAX_BOOST * entity_hit_ratio
+
+        if years:
+            title_source = f"{title} {source}"
+            year_in_title = any(y in title_source for y in years)
+            year_in_text = any(y in full_text for y in years)
+            if year_in_title:
+                boost += KEYWORD_YEAR_TITLE_BONUS
+            if not year_in_text and year_is_critical:
+                boost -= KEYWORD_YEAR_MISSING_PENALTY
+
+        candidate.rerank_score += boost * scale
+
+    top_candidates.sort(key=lambda item: item.rerank_score, reverse=True)
+    return top_candidates + rest_candidates
+
+
+def apply_sentence_level_refinement(
+    settings: AppSettings,
+    query: str,
+    candidates: list[RetrievalCandidate],
+    top_n: int = SENTENCE_REFINEMENT_TOP_N,
+) -> list[RetrievalCandidate]:
+    if len(candidates) <= 1:
+        return candidates
+
+    top_candidates = candidates[:top_n]
+    rest_candidates = candidates[top_n:]
+
+    all_sentences: list[str] = []
+    candidate_sentence_ranges: list[tuple[int, int]] = []
+    for candidate in top_candidates:
+        content = candidate.document.page_content or ""
+        sentences = [s.strip() for s in _SENTENCE_SPLIT_PATTERN.split(content) if s.strip() and len(s.strip()) >= 8]
+        if not sentences:
+            sentences = [content[:200]] if content else [""]
+        start = len(all_sentences)
+        all_sentences.extend(sentences)
+        candidate_sentence_ranges.append((start, len(all_sentences)))
+
+    if not all_sentences:
+        return candidates
+
+    try:
+        embeddings = build_embeddings(settings)
+        texts_to_embed = [query] + all_sentences
+        vectors = embed_texts_batched(embeddings, texts_to_embed, batch_size=32)
+        query_vec = np.array(vectors[0], dtype=np.float32)
+        sentence_vecs = np.array(vectors[1:], dtype=np.float32)
+        query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9)
+        sentence_norms = sentence_vecs / (np.linalg.norm(sentence_vecs, axis=1, keepdims=True) + 1e-9)
+        similarities = sentence_norms @ query_norm
+
+        for i, candidate in enumerate(top_candidates):
+            start, end = candidate_sentence_ranges[i]
+            if start < end:
+                max_sim = float(np.max(similarities[start:end]))
+                sentence_boost = max(0.0, min(SENTENCE_REFINEMENT_MAX_BOOST, max_sim * SENTENCE_REFINEMENT_MAX_BOOST))
+                candidate.rerank_score += sentence_boost
+
+        top_candidates.sort(key=lambda item: item.rerank_score, reverse=True)
+    except Exception:
+        pass
+
+    return top_candidates + rest_candidates
 
 
 def rerank_candidates(
@@ -176,13 +325,25 @@ def rerank_candidates(
             )
         reranked.append(candidate)
 
-    apply_same_sample_group_rerank_adjustments(reranked)
+    is_comparative_query = build_comparative_entity_profile(query).is_multi_entity_comparative
+    apply_same_sample_group_rerank_adjustments(
+        reranked,
+        allow_group_dominance=not is_comparative_query,
+    )
     apply_joint_query_rerank_adjustments(reranked, joint_query_profile=joint_query_profile)
     reranked.sort(key=lambda item: item.rerank_score, reverse=True)
+    reranked = apply_sentence_level_refinement(settings, query, reranked)
+    reranked = apply_keyword_entity_alignment_boost(query, reranked)
     cutoff = resolve_rerank_cutoff(settings, query_profile, top_k)
-    return ensure_modality_coverage(
+    selected = ensure_modality_coverage(
         reranked_candidates=reranked,
         required_modalities=resolve_required_modalities_for_query(query_profile),
+        cutoff=cutoff,
+    )
+    return ensure_comparative_entity_coverage(
+        selected_candidates=selected,
+        reranked_candidates=reranked,
+        comparative_profile=build_comparative_query_profile(query_bundle),
         cutoff=cutoff,
     )
 
@@ -199,6 +360,7 @@ def heuristic_rerank_candidates(
 
     query_profile = infer_query_modality_profile(query_bundle)
     temporal_profile = infer_temporal_query_profile(query_bundle)
+    comparative_profile = build_comparative_query_profile(query_bundle)
     query_terms = build_match_terms(query_bundle)
     max_fused = max((item.fused_score for item in candidates), default=1.0) or 1.0
     max_dense = max((item.dense_relevance for item in candidates), default=1.0) or 1.0
@@ -247,7 +409,28 @@ def heuristic_rerank_candidates(
         )
         source_text = f"{candidate.document.metadata.get('title', '')} {candidate.document.metadata.get('source', '')}".lower()
         source_bonus = 0.4 if any(term in source_text for term in query_terms if len(term) >= 2) else 0.0
+        title_text = str(candidate.document.metadata.get("title", "") or "").strip()
+        section_title_text = str(candidate.document.metadata.get("section_title", "") or "").strip()
+        title_terms = set(build_match_terms([title_text, section_title_text]))
+        title_overlap_ratio = (
+            len(title_terms & query_term_set) / len(query_term_set)
+            if query_term_set and title_terms
+            else 0.0
+        )
         answer_support_bonus = compute_answer_support_bonus(primary_query, preferred_answer_text)
+        comparative_coverage_bonus = compute_comparative_coverage_bonus(
+            comparative_profile=comparative_profile,
+            title=str(candidate.document.metadata.get("title", "") or ""),
+            section_title=str(candidate.document.metadata.get("section_title", "") or ""),
+            source=str(candidate.document.metadata.get("source", "") or ""),
+            search_text=search_text,
+            page_text=page_text,
+        )
+        temporal_role_bonus = compute_temporal_role_bonus(
+            candidate.document,
+            search_text=search_text,
+            temporal_profile=temporal_profile,
+        )
         answer_focus_score = min(
             1.0,
             0.35 * body_overlap_ratio
@@ -280,9 +463,12 @@ def heuristic_rerank_candidates(
                 + 0.06 * phrase_bonus
                 + 0.10 * normalized_bonus
                 + 0.04 * source_bonus
+                + 0.12 * title_overlap_ratio
                 + answer_support_bonus
+                + comparative_coverage_bonus
                 + modality_bonus
                 + temporal_bonus
+                + temporal_role_bonus
                 + 0.05 * temporal_match_score
                 + 0.04 * event_type_match_score
                 + 0.04 * location_match_score
@@ -298,8 +484,10 @@ def heuristic_rerank_candidates(
                 + 0.04 * body_overlap_ratio
                 + 0.04 * answer_window_overlap_ratio
                 + answer_support_bonus
+                + comparative_coverage_bonus
                 + modality_bonus
                 + temporal_bonus
+                + temporal_role_bonus
                 + 0.03 * temporal_match_score
                 + 0.02 * event_type_match_score
                 + 0.02 * location_match_score
@@ -321,11 +509,22 @@ def heuristic_rerank_candidates(
         )
         candidate.relevance_score = max(
             -0.25,
-            min(1.0, candidate.relevance_score + temporal_bonus),
+            min(1.0, candidate.relevance_score + temporal_bonus + 0.40 * comparative_coverage_bonus),
         )
         candidate.body_overlap_ratio = body_overlap_ratio
         candidate.answer_window_overlap_ratio = answer_window_overlap_ratio
         candidate.answer_support_bonus = answer_support_bonus
+
+        chunk_noise_penalty = 0.0
+        if (
+            answer_window_overlap_ratio < 0.05
+            and answer_support_bonus < 0.01
+            and body_overlap_ratio < 0.10
+            and overlap_ratio < 0.15
+        ):
+            chunk_noise_penalty = -0.12
+        candidate.rerank_score += chunk_noise_penalty
+        candidate.relevance_score = max(-0.25, candidate.relevance_score + chunk_noise_penalty)
         candidate.answer_focus_score = answer_focus_score
         candidate.temporal_match_score = temporal_match_score
         candidate.event_type_match_score = event_type_match_score
@@ -336,13 +535,22 @@ def heuristic_rerank_candidates(
         reranked.append(candidate)
 
     reranked.sort(key=lambda item: item.rerank_score, reverse=True)
-    apply_same_sample_group_rerank_adjustments(reranked)
+    apply_same_sample_group_rerank_adjustments(
+        reranked,
+        allow_group_dominance=not comparative_profile.is_multi_entity_comparative,
+    )
     apply_joint_query_rerank_adjustments(reranked, joint_query_profile=joint_query_profile)
     reranked.sort(key=lambda item: item.rerank_score, reverse=True)
     cutoff = resolve_rerank_cutoff(settings, query_profile, top_k)
-    return ensure_modality_coverage(
+    selected = ensure_modality_coverage(
         reranked_candidates=reranked,
         required_modalities=resolve_required_modalities_for_query(query_profile),
+        cutoff=cutoff,
+    )
+    return ensure_comparative_entity_coverage(
+        selected_candidates=selected,
+        reranked_candidates=reranked,
+        comparative_profile=comparative_profile,
         cutoff=cutoff,
     )
 
@@ -353,7 +561,11 @@ def diversify_candidates(
     query_profile: QueryModalityProfile,
     joint_query_profile: JointQueryProfile,
     diversity_profile: DiversityQueryProfile,
+    query_bundle: list[str] | None = None,
 ) -> list[RetrievalCandidate]:
+    if diversity_profile.prefer_family_diversity:
+        target_count = max(target_count, min(len(candidates), target_count + 3))
+
     if joint_query_profile.is_joint_query:
         joint_candidates = select_joint_query_candidates(
             candidates,
@@ -363,12 +575,15 @@ def diversify_candidates(
         if joint_candidates:
             return joint_candidates
 
-    dominant_group_candidates = select_dominant_sample_group_candidates(
-        candidates,
-        target_count=target_count,
-    )
-    if dominant_group_candidates:
-        return dominant_group_candidates
+    comparative_profile = build_comparative_query_profile(query_bundle or [])
+    if comparative_profile.is_multi_entity_comparative:
+        comparative_coverage_candidates = select_comparative_diverse_candidates(
+            candidates,
+            target_count=target_count,
+            comparative_profile=comparative_profile,
+        )
+        if comparative_coverage_candidates:
+            return comparative_coverage_candidates
 
     if diversity_profile.prefer_family_diversity:
         diversified_family_candidates = select_family_diverse_candidates(
@@ -379,50 +594,16 @@ def diversify_candidates(
         if diversified_family_candidates:
             return diversified_family_candidates
 
+    dominant_group_candidates = select_dominant_sample_group_candidates(
+        candidates,
+        target_count=target_count,
+        allow_group_dominance=not diversity_profile.prefer_family_diversity,
+    )
+    if dominant_group_candidates:
+        return dominant_group_candidates
+
     selected: list[RetrievalCandidate] = []
-    reserve: list[RetrievalCandidate] = []
-    seen_doc_ids: set[str] = set()
-
-    required_modalities = resolve_required_modalities_for_query(query_profile)
-    for required_modality in required_modalities:
-        for item in candidates:
-            doc_id = get_document_doc_id(item.document)
-            source_modality = get_source_modality(item.document)
-            if source_modality != required_modality:
-                continue
-            if doc_id and doc_id in seen_doc_ids:
-                continue
-            selected.append(item)
-            if doc_id:
-                seen_doc_ids.add(doc_id)
-            break
-        if len(selected) >= target_count:
-            return selected[:target_count]
-
-    for item in candidates:
-        doc_id = get_document_doc_id(item.document)
-        if doc_id and doc_id not in seen_doc_ids:
-            selected.append(item)
-            seen_doc_ids.add(doc_id)
-        else:
-            reserve.append(item)
-        if len(selected) >= target_count:
-            return selected[:target_count]
-
-    for item in reserve:
-        selected.append(item)
-        if len(selected) >= target_count:
-            break
-    return selected[:target_count]
-
-
-def select_family_diverse_candidates(
-    candidates: list[RetrievalCandidate],
-    *,
-    target_count: int,
-    query_profile: QueryModalityProfile,
-) -> list[RetrievalCandidate]:
-    selected: list[RetrievalCandidate] = []
+    reserve_answer_support: list[RetrievalCandidate] = []
     reserve: list[RetrievalCandidate] = []
     seen_doc_ids: set[str] = set()
     seen_family_ids: set[str] = set()
@@ -452,34 +633,336 @@ def select_family_diverse_candidates(
         doc_id = get_document_doc_id(item.document)
         family_id = get_document_family_id(item.document)
         if doc_id and doc_id in seen_doc_ids:
-            reserve.append(item)
+            if candidate_has_duplicate_rescue_value(item):
+                reserve_answer_support.append(item)
+            else:
+                reserve.append(item)
+        elif family_id and family_id in seen_family_ids:
+            if candidate_has_duplicate_rescue_value(item):
+                reserve_answer_support.append(item)
+            else:
+                reserve.append(item)
+        else:
+            selected.append(item)
+            if doc_id:
+                seen_doc_ids.add(doc_id)
+            if family_id:
+                seen_family_ids.add(family_id)
+        if len(selected) >= target_count:
+            return selected[:target_count]
+
+    for bucket in (reserve_answer_support, reserve):
+        for item in bucket:
+            doc_id = get_document_doc_id(item.document)
+            if doc_id and doc_id in seen_doc_ids:
+                continue
+            selected.append(item)
+            if doc_id:
+                seen_doc_ids.add(doc_id)
+            if len(selected) >= target_count:
+                break
+        if len(selected) >= target_count:
+            break
+    return selected[:target_count]
+
+
+def select_family_diverse_candidates(
+    candidates: list[RetrievalCandidate],
+    *,
+    target_count: int,
+    query_profile: QueryModalityProfile,
+) -> list[RetrievalCandidate]:
+    min_sources = min(3, target_count)
+    selected: list[RetrievalCandidate] = []
+    reserve_answer_support: list[RetrievalCandidate] = []
+    reserve_family_duplicates: list[RetrievalCandidate] = []
+    reserve: list[RetrievalCandidate] = []
+    seen_doc_ids: set[str] = set()
+    seen_family_ids: set[str] = set()
+    seen_sources: set[str] = set()
+
+    required_modalities = resolve_required_modalities_for_query(query_profile)
+    for required_modality in required_modalities:
+        for item in candidates:
+            doc_id = get_document_doc_id(item.document)
+            family_id = get_document_family_id(item.document)
+            source_modality = get_source_modality(item.document)
+            if source_modality != required_modality:
+                continue
+            if doc_id and doc_id in seen_doc_ids:
+                continue
+            if family_id and family_id in seen_family_ids:
+                continue
+            selected.append(item)
+            if doc_id:
+                seen_doc_ids.add(doc_id)
+            if family_id:
+                seen_family_ids.add(family_id)
+            break
+        if len(selected) >= target_count:
+            return selected[:target_count]
+
+    for item in candidates:
+        doc_id = get_document_doc_id(item.document)
+        family_id = get_document_family_id(item.document)
+        if doc_id and doc_id in seen_doc_ids:
+            if candidate_has_duplicate_rescue_value(item):
+                reserve_answer_support.append(item)
+            else:
+                reserve.append(item)
             continue
         if family_id and family_id in seen_family_ids:
-            reserve.append(item)
+            if candidate_has_duplicate_rescue_value(item):
+                reserve_answer_support.append(item)
+            else:
+                reserve_family_duplicates.append(item)
             continue
         selected.append(item)
         if doc_id:
             seen_doc_ids.add(doc_id)
         if family_id:
             seen_family_ids.add(family_id)
+        source = str(item.document.metadata.get("source", "")).strip()
+        if source:
+            seen_sources.add(source)
         if len(selected) >= target_count:
             return selected[:target_count]
 
+    if len(seen_sources) < min_sources:
+        for item in candidates:
+            if item in selected or item in reserve_answer_support or item in reserve_family_duplicates or item in reserve:
+                continue
+            source = str(item.document.metadata.get("source", "")).strip()
+            if source and source not in seen_sources:
+                selected.append(item)
+                doc_id = get_document_doc_id(item.document)
+                if doc_id:
+                    seen_doc_ids.add(doc_id)
+                seen_sources.add(source)
+                if len(seen_sources) >= min_sources or len(selected) >= target_count:
+                    break
+
     for item in candidates:
-        if item in selected or item in reserve:
+        if (
+            item in selected
+            or item in reserve_answer_support
+            or item in reserve_family_duplicates
+            or item in reserve
+        ):
             continue
         reserve.append(item)
 
-    for item in reserve:
-        doc_id = get_document_doc_id(item.document)
-        if doc_id and doc_id in seen_doc_ids:
-            continue
-        selected.append(item)
-        if doc_id:
-            seen_doc_ids.add(doc_id)
+    for bucket in (reserve_answer_support, reserve_family_duplicates, reserve):
+        for item in bucket:
+            doc_id = get_document_doc_id(item.document)
+            if doc_id and doc_id in seen_doc_ids:
+                continue
+            selected.append(item)
+            if doc_id:
+                seen_doc_ids.add(doc_id)
+            if len(selected) >= target_count:
+                break
         if len(selected) >= target_count:
             break
     return selected[:target_count]
+
+
+def select_comparative_diverse_candidates(
+    candidates: list[RetrievalCandidate],
+    *,
+    target_count: int,
+    comparative_profile: ComparativeQueryProfile,
+) -> list[RetrievalCandidate]:
+    if not candidates:
+        return []
+
+    entity_names = comparative_profile.entity_names
+    if not comparative_profile.is_multi_entity_comparative or len(entity_names) < 2:
+        return []
+
+    selected: list[RetrievalCandidate] = []
+    seen_chunk_ids: set[str] = set()
+    seen_family_ids: set[str] = set()
+    entity_match_counts: dict[str, int] = {entity_name: 0 for entity_name in entity_names}
+
+    for entity_name in entity_names:
+        for item in candidates:
+            chunk_id = get_chunk_id(item.document)
+            family_id = get_document_family_id(item.document)
+            if chunk_id in seen_chunk_ids or not candidate_matches_comparative_entity(item, entity_name):
+                continue
+            if family_id and family_id in seen_family_ids:
+                continue
+            selected.append(item)
+            seen_chunk_ids.add(chunk_id)
+            if family_id:
+                seen_family_ids.add(family_id)
+            entity_match_counts[entity_name] += 1
+            break
+
+    reserve_aspect_support: list[RetrievalCandidate] = []
+    reserve_non_duplicate_entity: list[RetrievalCandidate] = []
+    reserve_noise_without_entity_match: list[RetrievalCandidate] = []
+    reserve_duplicate_entity: list[RetrievalCandidate] = []
+    for item in candidates:
+        if len(selected) >= target_count:
+            break
+        chunk_id = get_chunk_id(item.document)
+        family_id = get_document_family_id(item.document)
+        if chunk_id in seen_chunk_ids:
+            continue
+        if family_id and family_id in seen_family_ids:
+            continue
+
+        matched_entities = [
+            entity_name for entity_name in entity_names
+            if candidate_matches_comparative_entity(item, entity_name)
+        ]
+        has_aspect_support = candidate_has_comparative_aspect_support(
+            item,
+            comparative_profile=comparative_profile,
+        )
+        if has_aspect_support:
+            reserve_aspect_support.append(item)
+            continue
+        if matched_entities and (
+            len(matched_entities) >= 2
+            or any(entity_match_counts.get(entity_name, 0) <= 0 for entity_name in matched_entities)
+        ):
+            reserve_non_duplicate_entity.append(item)
+            continue
+        if matched_entities:
+            reserve_duplicate_entity.append(item)
+            continue
+        reserve_noise_without_entity_match.append(item)
+
+    for bucket in (
+        reserve_aspect_support,
+        reserve_non_duplicate_entity,
+        reserve_duplicate_entity,
+        reserve_noise_without_entity_match,
+    ):
+        for item in bucket:
+            if len(selected) >= target_count:
+                break
+            chunk_id = get_chunk_id(item.document)
+            family_id = get_document_family_id(item.document)
+            if chunk_id in seen_chunk_ids:
+                continue
+            if family_id and family_id in seen_family_ids:
+                continue
+            selected.append(item)
+            seen_chunk_ids.add(chunk_id)
+            if family_id:
+                seen_family_ids.add(family_id)
+            for entity_name in entity_names:
+                if candidate_matches_comparative_entity(item, entity_name):
+                    entity_match_counts[entity_name] = entity_match_counts.get(entity_name, 0) + 1
+
+    return selected[:target_count]
+
+
+def candidate_has_duplicate_rescue_value(candidate: RetrievalCandidate) -> bool:
+    answer_support_bonus = max(float(candidate.answer_support_bonus), 0.0)
+    answer_focus_score = max(float(candidate.answer_focus_score), 0.0)
+    has_sentence_hit = bool(
+        candidate.sentence_text.strip()
+        or str(candidate.document.metadata.get("sentence_query_hit", "") or "").strip()
+    )
+    if answer_focus_score >= 0.28:
+        return True
+    if answer_support_bonus >= 0.08:
+        return True
+    return answer_support_bonus >= 0.05 and answer_focus_score >= 0.16 and has_sentence_hit
+
+
+def candidate_matches_comparative_entity(
+    candidate: RetrievalCandidate,
+    entity_name: str,
+) -> bool:
+    title = str(candidate.document.metadata.get("title", "") or "").strip().lower()
+    section_title = str(candidate.document.metadata.get("section_title", "") or "").strip().lower()
+    source = str(candidate.document.metadata.get("source", "") or "").strip().lower()
+    search_text = build_search_text(candidate.document).lower()
+    return comparative_entity_matches_text(
+        entity_name,
+        title=title,
+        section_title=section_title,
+        source=source,
+        search_text=search_text,
+    )
+
+
+def candidate_has_comparative_aspect_support(
+    candidate: RetrievalCandidate,
+    *,
+    comparative_profile: ComparativeQueryProfile,
+) -> bool:
+    if not comparative_profile.aspect_terms:
+        return False
+
+    title = str(candidate.document.metadata.get("title", "") or "").strip().lower()
+    section_title = str(candidate.document.metadata.get("section_title", "") or "").strip().lower()
+    source = str(candidate.document.metadata.get("source", "") or "").strip().lower()
+    search_text = build_search_text(candidate.document).lower()
+    combined = "\n".join(item for item in (title, section_title, source, search_text) if item)
+    if not combined:
+        return False
+
+    return any(term.lower() in combined for term in comparative_profile.aspect_terms)
+
+
+def build_comparative_query_profile(
+    query_bundle: list[str],
+) -> ComparativeQueryProfile:
+    primary_query = next((item.strip() for item in query_bundle if item.strip()), "")
+    entity_profile = build_comparative_entity_profile(primary_query)
+    if not entity_profile.is_multi_entity_comparative:
+        return ComparativeQueryProfile(False, (), ())
+    focus_profile = build_comparative_focus_profile(primary_query)
+    return ComparativeQueryProfile(
+        is_multi_entity_comparative=True,
+        entity_names=entity_profile.entity_names,
+        aspect_terms=focus_profile.aspect_terms,
+    )
+
+
+def compute_comparative_coverage_bonus(
+    *,
+    comparative_profile: ComparativeQueryProfile,
+    title: str,
+    section_title: str,
+    source: str,
+    search_text: str,
+    page_text: str,
+) -> float:
+    if not comparative_profile.is_multi_entity_comparative:
+        return 0.0
+
+    haystack = f"{search_text}\n{page_text}\n{source}".lower()
+    entity_hits = sum(
+        1
+        for item in comparative_profile.entity_names
+        if comparative_entity_matches_text(
+            item,
+            title=title,
+            section_title=section_title,
+            source=source,
+            search_text=search_text,
+        )
+    )
+    aspect_hits = sum(1 for item in comparative_profile.aspect_terms if item.lower() in haystack)
+    if entity_hits <= 0:
+        return 0.0
+
+    bonus = 0.03
+    if entity_hits >= 2:
+        bonus += 0.025
+    if aspect_hits > 0:
+        bonus += min(0.03, 0.012 * aspect_hits)
+    return min(0.08, bonus)
+
+
 
 
 def compute_body_overlap_ratio(page_text: str, query_term_set: set[str]) -> float:
@@ -540,6 +1023,55 @@ def compute_answer_support_bonus(primary_query: str, page_text: str) -> float:
             bonus += 0.03
 
     return min(0.14, bonus)
+
+
+def compute_temporal_role_bonus(
+    document: Document,
+    *,
+    search_text: str,
+    temporal_profile: TemporalQueryProfile,
+) -> float:
+    if not temporal_profile.is_current_role_query or not temporal_profile.asked_role_terms:
+        return 0.0
+
+    title = str(document.metadata.get("title", "") or "").strip().lower()
+    section_title = str(document.metadata.get("section_title", "") or "").strip().lower()
+    source = str(document.metadata.get("source", "") or "").strip().lower()
+    combined = "\n".join(item for item in (title, section_title, source, search_text.lower()) if item)
+    if not combined:
+        return 0.0
+
+    asked_roles = tuple(term.lower() for term in temporal_profile.asked_role_terms if term)
+    conflicting_roles = resolve_conflicting_role_terms(asked_roles)
+    asked_role_hits = sum(1 for term in asked_roles if term in combined)
+    conflicting_role_hits = sum(1 for term in conflicting_roles if term in combined)
+
+    bonus = 0.0
+    if asked_role_hits > 0:
+        bonus += min(0.08, 0.05 + 0.02 * (asked_role_hits - 1))
+        if any(term in title or term in section_title or term in source for term in asked_roles):
+            bonus += 0.03
+    if conflicting_role_hits > 0 and asked_role_hits == 0:
+        bonus -= min(0.10, 0.06 + 0.02 * (conflicting_role_hits - 1))
+    return bonus
+
+
+def resolve_conflicting_role_terms(asked_roles: tuple[str, ...]) -> tuple[str, ...]:
+    role_conflicts = {
+        "校长": ("书记",),
+        "书记": ("校长",),
+        "院长": ("主任", "负责人"),
+        "主任": ("院长", "负责人"),
+        "负责人": ("主任", "院长"),
+    }
+    conflicts: list[str] = []
+    for role in asked_roles:
+        conflicts.extend(role_conflicts.get(role, ()))
+    unique_conflicts = []
+    for role in conflicts:
+        if role not in unique_conflicts and role not in asked_roles:
+            unique_conflicts.append(role)
+    return tuple(unique_conflicts)
 
 
 def build_candidate_rerank_text(
@@ -1070,9 +1602,72 @@ def ensure_modality_coverage(
     return selected[:cutoff]
 
 
+def ensure_comparative_entity_coverage(
+    *,
+    selected_candidates: list[RetrievalCandidate],
+    reranked_candidates: list[RetrievalCandidate],
+    comparative_profile: ComparativeQueryProfile,
+    cutoff: int,
+) -> list[RetrievalCandidate]:
+    if not comparative_profile.is_multi_entity_comparative or len(comparative_profile.entity_names) < 2:
+        return selected_candidates[:cutoff]
+
+    selected = list(selected_candidates[:cutoff])
+    if not selected:
+        return selected
+
+    selected_chunk_ids = {get_chunk_id(item.document) for item in selected}
+    covered_entities = {
+        entity_name
+        for entity_name in comparative_profile.entity_names
+        if any(candidate_matches_comparative_entity(item, entity_name) for item in selected)
+    }
+    missing_entities = [
+        entity_name
+        for entity_name in comparative_profile.entity_names
+        if entity_name not in covered_entities
+    ]
+    if not missing_entities:
+        return selected[:cutoff]
+
+    replacement_index = len(selected) - 1
+    for entity_name in missing_entities:
+        rescue_candidate = next(
+            (
+                item
+                for item in reranked_candidates
+                if get_chunk_id(item.document) not in selected_chunk_ids
+                and candidate_matches_comparative_entity(item, entity_name)
+            ),
+            None,
+        )
+        if rescue_candidate is None:
+            continue
+
+        while replacement_index >= 0 and any(
+            candidate_matches_comparative_entity(selected[replacement_index], existing_entity)
+            for existing_entity in comparative_profile.entity_names
+        ):
+            replacement_index -= 1
+        if replacement_index < 0:
+            break
+
+        removed = selected[replacement_index]
+        selected_chunk_ids.discard(get_chunk_id(removed.document))
+        selected[replacement_index] = rescue_candidate
+        selected_chunk_ids.add(get_chunk_id(rescue_candidate.document))
+        replacement_index -= 1
+
+    return selected[:cutoff]
+
+
 def apply_same_sample_group_rerank_adjustments(
     candidates: list[RetrievalCandidate],
+    *,
+    allow_group_dominance: bool = True,
 ) -> None:
+    if not allow_group_dominance:
+        return
     group_stats = build_sample_group_stats(candidates)
     if len(group_stats) < 2:
         return
@@ -1098,17 +1693,17 @@ def apply_same_sample_group_rerank_adjustments(
             continue
 
         group_ratio = stats.aggregate_score / dominant_score
-        count_bonus = 0.02 * min(max(stats.candidate_count - 1, 0), 2)
+        count_bonus = 0.012 * min(max(stats.candidate_count - 1, 0), 2)
         if sample_id == dominant_group.sample_id:
-            boost = 0.06 + 0.08 * group_ratio + count_bonus + 0.10 * dominance_ratio
+            boost = 0.035 + 0.05 * group_ratio + count_bonus + 0.06 * dominance_ratio
             candidate.rerank_score += boost
             candidate.relevance_score = min(
                 1.0,
-                candidate.relevance_score + 0.04 + 0.06 * dominance_ratio,
+                candidate.relevance_score + 0.025 + 0.04 * dominance_ratio,
             )
             continue
 
-        penalty = 0.04 + 0.08 * (1.0 - group_ratio) + 0.12 * dominance_ratio
+        penalty = 0.025 + 0.05 * (1.0 - group_ratio) + 0.07 * dominance_ratio
         candidate.rerank_score -= penalty
         candidate.relevance_score = max(-0.25, candidate.relevance_score - penalty)
 
@@ -1117,7 +1712,10 @@ def select_dominant_sample_group_candidates(
     candidates: list[RetrievalCandidate],
     *,
     target_count: int,
+    allow_group_dominance: bool = True,
 ) -> list[RetrievalCandidate]:
+    if not allow_group_dominance:
+        return []
     if target_count < SAMPLE_GROUP_MIN_COUNT_FOR_TRIM:
         return []
 

@@ -86,7 +86,9 @@ class KBSettings(BaseModel):
     TRACE_LOG_MAX_REFERENCES: int = Field(default=8, ge=1, le=20)
     EMBEDDING_BATCH_SIZE: int = Field(default=32, ge=1, le=512)
     DOC_PARSE_WORKERS: int = Field(default=4, ge=1, le=16)
-    SMALL_TO_BIG_EXPAND_CHUNKS: int = Field(default=1, ge=0, le=5)
+    SMALL_TO_BIG_EXPAND_CHUNKS: int = Field(default=2, ge=0, le=5)
+    SMALL_TO_BIG_MAX_CHARS: int = Field(default=2000, ge=400, le=6000)
+    SMALL_TO_BIG_SECTION_AWARE: bool = True
     IMAGE_OCR_ENABLED: bool = True
     IMAGE_OCR_BACKEND: str = "tesseract"
     IMAGE_OCR_INSTRUCTION_PAGE_BACKEND: str = "paddle"
@@ -105,6 +107,10 @@ class KBSettings(BaseModel):
     TEMP_KB_TTL_MINUTES: int = Field(default=120, ge=1)
     TEMP_KB_CLEANUP_ON_STARTUP: bool = True
     TEMP_KB_TOUCH_ON_ACCESS: bool = True
+    ENABLE_TITLE_WEIGHTED_EMBEDDING: bool = True
+    ENABLE_CHUNK_QUESTION_GENERATION: bool = False
+    CHUNK_QUESTION_BATCH_SIZE: int = Field(default=8, ge=1, le=32)
+    CHUNK_QUESTION_MAX_PER_CHUNK: int = Field(default=2, ge=1, le=5)
     SUPPORTED_EXTENSIONS: list[str] = Field(
         default_factory=lambda: [
             ".txt",
@@ -127,6 +133,8 @@ class ModelSettings(BaseModel):
 
     LLM_PROVIDER: str = "ollama"
     EMBEDDING_PROVIDER: str = ""  # 留空则跟随 LLM_PROVIDER；可单独设为 "ollama" 或 "openai_compatible"
+    EMBEDDING_BASE_URL: str = ""  # 留空则跟随 OPENAI_COMPATIBLE_BASE_URL
+    EMBEDDING_API_KEY: str = ""  # 留空则跟随 OPENAI_COMPATIBLE_API_KEY
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OPENAI_COMPATIBLE_BASE_URL: str = ""
     OPENAI_COMPATIBLE_API_KEY: str = ""
@@ -263,6 +271,7 @@ SENSITIVE_CONFIG_FIELDS: dict[str, set[str]] = {
     "model_settings.yaml": {
         "OPENAI_COMPATIBLE_API_KEY",
         "IMAGE_VLM_API_KEY",
+        "EMBEDDING_API_KEY",
     }
 }
 
