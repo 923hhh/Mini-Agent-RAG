@@ -146,6 +146,28 @@ DomainRAG 包含 5 类任务（各20条）：extractive_qa、conversation_qa、m
 
 这组结果说明：在修复 `positive_reference` 的 `dict/list` 兼容问题后，DomainRAG 全量本地评测已经覆盖全部 `346` 条样本，不再只统计局部可对齐子集。新的结果显示，`conversation_qa` 是当前表现最稳的一类；而主要短板仍集中在 `multi-doc_qa` 的多证据覆盖不足，以及 `time-sensitive_qa` 的前排排序质量偏弱。
 
+#### DomainRAG 全量语料优化后评测（v9 当前最优）
+
+**报告文件**：[`../data/eval/domainrag_v9_full_346.json`](../data/eval/domainrag_v9_full_346.json)
+
+**优化配置**：bge-large embedding + bge-reranker-large (GPU) + 关键词实体对齐加分（max_boost=0.12, year_penalty=0.10, top_n=12）+ 条件式 keyword variant + multi-query 5 条 + score_threshold=0.25
+
+| 数据集             | 样本口径         | Recall@5 | MRR    | NDCG@5 | Hit@1  | Hit@10 |
+| ------------------ | ---------------- | -------- | ------ | ------ | ------ | ------ |
+| DomainRAG Local KB | 346 条全量样本   | 0.7023   | 0.6291 | 0.6158 | 0.5809 | 0.7225 |
+
+按任务拆分后：
+
+| 任务类型          | Recall@5 | MRR    | NDCG@5 | Hit@1  | All Positive Covered@10 |
+| ----------------- | -------- | ------ | ------ | ------ | ----------------------- |
+| conversation_qa   | 0.7143   | 0.6293 | 0.6509 | 0.5714 | 0.7347                  |
+| extractive_qa     | 0.6111   | 0.4998 | 0.5276 | 0.4333 | 0.6444                  |
+| multi-doc_qa      | 0.8958   | 0.8010 | 0.5958 | 0.7292 | 0.4375                  |
+| structured_qa     | 0.7872   | 0.7420 | 0.7534 | 0.7128 | 0.7979                  |
+| time-sensitive_qa | 0.5538   | 0.5179 | 0.5271 | 0.4923 | 0.5692                  |
+
+相对旧基线全面大幅提升：MRR +0.188、Hit@1 +0.179、Recall@5 +0.188。其中 `multi-doc_qa` MRR 从 0.3837 提升至 0.8010（+0.417），`structured_qa` MRR 从 0.4502 提升至 0.7420（+0.292），提升最为显著。当前主要剩余短板为 `extractive_qa`（Hit@1=0.43）和 `time-sensitive_qa`（Hit@1=0.49），后续可通过 embedding fine-tune 或 query decomposition 继续优化。
+
 #### DomainRAG 100 条平衡子集优化评测（v9 当前最优）
 
 **报告文件**：[`../data/eval/domainrag_v9_targeted_boost.json`](../data/eval/domainrag_v9_targeted_boost.json)
